@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from rclpy.duration import Duration
+import numpy as np
+
+from geometry_msgs.msg import PoseStamped, TransformStamped
+from nav_msgs.msg import Odometry
+from tf2_ros import TransformListener, Buffer
+from tf2_py import LookupException, ExtrapolationException, ConnectivityException
+
+from .transformer import OffsetTransformer, PoseTransformer
+
+
+class CoordinateTransformer(Node):
+    """
+    坐标转换节点
+
+    功能:
+    1. 订阅 odom 坐标系下的 odin 位姿，转换为 map 坐标系
+    2. 支持传感器到机器人中心的偏移补偿
+    3. 支持 map 原点偏移调整
+    """
+
+    def __init__(self):
+        super().__init__('coordinate_transformer')
+
+        # TF2 缓冲区和监听器
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        # 从参数服务器加载配置
+        self.declare_parameters(
+            namespace='coordinate_transformer',
+            parameters=[
+                ('sensor_offset', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                ('map_origin_offset', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                ('source_frame', 'odom'),
+                ('target_frame', 'map'),
+                ('tf_timeout', 1.0),
+                ('odin_pose_topic', '/odin_odom'),
+                ('output_pose_topic', '/transformed/pose'),
+                ('publish_transformed_pose', True),
+            ]
+        )
+
+        sensor_offset = self.get_parameter('coordinate_transformer.sensor_offset').value
+        map_origin_offset = self.get_parameter('coordinate_transformer.map_origin_offset').value
+        self.source_frame = self.get_parameter('coordinate_transformer.source_frame').value
+        self.target_frame = self.get_parameter('coordinate_transformer.target_frame').value
+        self.tf_timeout = self.get_parameter('coordinate_transformer.tf_timeout').value
+        self.odin_pose_topic = self.get_parameter('coordinate_transformer.odin_pose_topic').value
+        self.output_pose_topic = self.get_parameter('coordinate_transformer.output_pose_topic').value
+        publish_pose = self.get_parameter('coordinate_transformer.publish_transformed_pose').value
+
+        # 初始化变换器
+        self.transformer = OffsetTransformer(sensor_offset, map_origin_offset)
+        self.pose_transformer = PoseTransformer()
+
+        self.get_logger().info(f"""
+        Parameters loaded:
+            Sensor offset: {sensor_offset}
+            Map origin offset: {map_origin_offset}
+            Transform: {self.source_frame} -> {self.target_frame}
+            Odin pose topic: {self.odin_pose_topic}
+            Output pose topic: {self.output_pose_topic}
+            """)
+
+        # 订阅 odin 位姿 (来自 SLAM 的 odom 输出)
+        self.odin_sub = self.create_subscription(
+            Odometry,
+            self.odin_pose_topic,
+            self.odin_pose_callback,
+            10
+        )
+
+        # 发布转换后的位姿
+        self.pose_pub = None
+        if publish_pose:
+            self.pose_pub = self.create_publisher(
+                PoseStamped,
+                self.output_pose_topic,
+                10
+            )
+
+        self.get_logger().info('Coordinate transformer initialized')
+
+    def odin_pose_callback(self, msg: Odometry):
+        """处理 odin 位姿，转换到 map 坐标系"""
+        try:
+            # 获取 odom -> map 的 TF 变换
+            transform = self.tf_buffer.lookup_transform(
+                self.target_frame,
+                self.source_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=self.tf_timeout)
+            )
+
+            # 提取 odin 在 odom 下的位姿
+            odom_pose = (
+                msg.pose.pose.position.x,
+                msg.pose.pose.position.y,
+                msg.pose.pose.position.z,
+                msg.pose.pose.orientation.x,
+                msg.pose.pose.orientation.y,
+                msg.pose.pose.orientation.z,
+                msg.pose.pose.orientation.w,
+            )
+
+            # 转换 TF 消息为矩阵
+            tf_matrix = self._transform_to_matrix(transform)
+
+            # 执行完整坐标变换
+            map_pose = self.transformer.odom_to_map_with_offset(odom_pose, tf_matrix)
+
+            # 发布转换后的位姿
+            transformed_pose = PoseStamped()
+            transformed_pose.header.frame_id = self.target_frame
+            transformed_pose.header.stamp = self.get_clock().now().to_msg()
+            transformed_pose.pose.position.x = map_pose[0]
+            transformed_pose.pose.position.y = map_pose[1]
+            transformed_pose.pose.position.z = map_pose[2]
+            transformed_pose.pose.orientation.x = map_pose[3]
+            transformed_pose.pose.orientation.y = map_pose[4]
+            transformed_pose.pose.orientation.z = map_pose[5]
+            transformed_pose.pose.orientation.w = map_pose[6]
+
+            if self.pose_pub:
+                self.pose_pub.publish(transformed_pose)
+
+        except LookupException as e:
+            self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5)
+        except ExtrapolationException as e:
+            self.get_logger().warn(f'TF extrapolation failed: {e}', throttle_duration_sec=5)
+        except ConnectivityException as e:
+            self.get_logger().warn(f'TF connectivity failed: {e}', throttle_duration_sec=5)
+
+    def _transform_to_matrix(self, transform: TransformStamped) -> np.ndarray:
+        """将 TF 消息转换为 4x4 矩阵"""
+        t = transform.transform.translation
+        q = transform.transform.rotation
+
+        return self.pose_transformer.pose_to_matrix(t.x, t.y, t.z, q.x, q.y, q.z, q.w)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = CoordinateTransformer()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
