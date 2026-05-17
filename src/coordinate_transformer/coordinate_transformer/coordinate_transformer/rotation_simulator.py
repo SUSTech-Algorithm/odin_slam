@@ -301,7 +301,7 @@ def main():
                         help='Rotation center Y (default: 0)')
     parser.add_argument('--radius', type=float, default=1.0,
                         help='Rotation radius in meters (default: 1.0)')
-    parser.add_argument('--offset-x', type=float, default=0.35,
+    parser.add_argument('--offset-x', type=float, default=-0.35,
                         help='Sensor offset X from robot center (default: 0.35)')
     parser.add_argument('--offset-y', type=float, default=0.0,
                         help='Sensor offset Y from robot center (default: 0.0)')
