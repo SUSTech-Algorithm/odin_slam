@@ -42,6 +42,7 @@ class CoordinateTransformer(Node):
                 ('odin_pose_topic', '/odin_odom'),
                 ('output_pose_topic', '/transformed/pose'),
                 ('publish_transformed_pose', True),
+                ('publish_rate', 10.0),
             ]
         )
 
@@ -53,6 +54,11 @@ class CoordinateTransformer(Node):
         self.odin_pose_topic = self.get_parameter('coordinate_transformer.odin_pose_topic').value
         self.output_pose_topic = self.get_parameter('coordinate_transformer.output_pose_topic').value
         publish_pose = self.get_parameter('coordinate_transformer.publish_transformed_pose').value
+        publish_rate = self.get_parameter('coordinate_transformer.publish_rate').value
+
+        # 缓存最新收到的位姿
+        self.latest_map_pose = None
+        self.latest_stamp = None
 
         # 初始化变换器
         self.transformer = OffsetTransformer(sensor_offset, map_origin_offset)
@@ -83,11 +89,16 @@ class CoordinateTransformer(Node):
                 self.output_pose_topic,
                 10
             )
+            # 创建定时器控制发布频率
+            self.publish_timer = self.create_timer(
+                1.0 / publish_rate,
+                self.publish_timer_callback
+            )
 
         self.get_logger().info('Coordinate transformer initialized')
 
     def odin_pose_callback(self, msg: Odometry):
-        """处理 odin 位姿，转换到 map 坐标系"""
+        """处理 odin 位姿，计算并缓存 map 坐标系下的结果"""
         try:
             # 获取 odom -> map 的 TF 变换
             transform = self.tf_buffer.lookup_transform(
@@ -111,23 +122,9 @@ class CoordinateTransformer(Node):
             # 转换 TF 消息为矩阵
             tf_matrix = self._transform_to_matrix(transform)
 
-            # 执行完整坐标变换
-            map_pose = self.transformer.odom_to_map_with_offset(odom_pose, tf_matrix)
-
-            # 发布转换后的位姿
-            transformed_pose = PoseStamped()
-            transformed_pose.header.frame_id = self.target_frame
-            transformed_pose.header.stamp = self.get_clock().now().to_msg()
-            transformed_pose.pose.position.x = map_pose[0]
-            transformed_pose.pose.position.y = map_pose[1]
-            transformed_pose.pose.position.z = map_pose[2]
-            transformed_pose.pose.orientation.x = map_pose[3]
-            transformed_pose.pose.orientation.y = map_pose[4]
-            transformed_pose.pose.orientation.z = map_pose[5]
-            transformed_pose.pose.orientation.w = map_pose[6]
-
-            if self.pose_pub:
-                self.pose_pub.publish(transformed_pose)
+            # 执行完整坐标变换，缓存结果
+            self.latest_map_pose = self.transformer.odom_to_map_with_offset(odom_pose, tf_matrix)
+            self.latest_stamp = self.get_clock().now().to_msg()
 
         except LookupException as e:
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5)
@@ -135,6 +132,24 @@ class CoordinateTransformer(Node):
             self.get_logger().warn(f'TF extrapolation failed: {e}', throttle_duration_sec=5)
         except ConnectivityException as e:
             self.get_logger().warn(f'TF connectivity failed: {e}', throttle_duration_sec=5)
+
+    def publish_timer_callback(self):
+        """定时器回调，按固定频率发布缓存的位姿"""
+        if self.latest_map_pose is None or self.pose_pub is None:
+            return
+
+        transformed_pose = PoseStamped()
+        transformed_pose.header.frame_id = self.target_frame
+        transformed_pose.header.stamp = self.latest_stamp
+        transformed_pose.pose.position.x = self.latest_map_pose[0]
+        transformed_pose.pose.position.y = self.latest_map_pose[1]
+        transformed_pose.pose.position.z = self.latest_map_pose[2]
+        transformed_pose.pose.orientation.x = self.latest_map_pose[3]
+        transformed_pose.pose.orientation.y = self.latest_map_pose[4]
+        transformed_pose.pose.orientation.z = self.latest_map_pose[5]
+        transformed_pose.pose.orientation.w = self.latest_map_pose[6]
+
+        self.pose_pub.publish(transformed_pose)
 
     def _transform_to_matrix(self, transform: TransformStamped) -> np.ndarray:
         """将 TF 消息转换为 4x4 矩阵"""

@@ -40,7 +40,7 @@ class PoseTransformer:
         """
         应用变换矩阵到当前位姿
 
-        :param current_pose: 元组 (x, y, z, qx, qy, qz, qw)
+        :param current_pose: 元组 (wx, y, z, qx, qy, qz, qw)
         :param transform_matrix: 4x4 numpy 数组
         :return: 变换后的新位姿 (x, y, z, qx, qy, qz, qw)
         """
@@ -65,9 +65,8 @@ class OffsetTransformer:
         """
         self.pose_transformer = PoseTransformer()
         self.T_sensor_to_robot = self._build_transform(sensor_offset)
-        self.T_map_origin_offset = self._build_transform(map_origin_offset)
         self.T_robot_to_sensor = self._inverse_transform(self.T_sensor_to_robot)
-
+        self.sensor_offset = sensor_offset
     @staticmethod
     def _build_transform(offset):
         """
@@ -108,9 +107,14 @@ class OffsetTransformer:
         :param tf_odom_to_map: odom 到 map 的 tf 变换矩阵 (从 TF 树获取)
         :return: 变换后的 map 坐标系下的位姿 (x, y, z, qx, qy, qz, qw)
         """
-        T_sensor_in_odom = self.pose_transformer.pose_to_matrix(*odom_pose)
-        T_robot_in_odom = T_sensor_in_odom @ self.T_robot_to_sensor
-        T_total = self.T_map_origin_offset @ tf_odom_to_map @ T_robot_in_odom
+        T_sensor_in_odom = self.pose_transformer.pose_to_matrix(*odom_pose) @ self.T_robot_to_sensor 
+        sensor_state = list(self.pose_transformer.matrix_to_pose(T_sensor_in_odom))
+        roll, pitch, yaw = R.from_quat([sensor_state[3], sensor_state[4], sensor_state[5], sensor_state[6]]).as_euler('xyz', degrees=False)
+        sensor_state[0] = sensor_state[0] 
+        sensor_state[1] = sensor_state[1] 
+        sensor_state[2] = sensor_state[2]
+        T_robot_in_odom = self.pose_transformer.pose_to_matrix(*sensor_state)
+        T_total = tf_odom_to_map @ T_robot_in_odom
         return self.pose_transformer.matrix_to_pose(T_total)
 
     def transform_point(self, point, tf_matrix):
