@@ -5,7 +5,8 @@ from scipy.spatial.transform import Rotation as R
 class PoseTransformer:
     """
     姿态变换类 - 使用 scipy 的 Rotation 类
-    兼容参考代码 forest_searching/transformation/robot_pose/transformer.py 的实现
+    坐标系约定: FLU (front-X, left-Y, up-Z)
+    欧拉角顺序: ZYX (yaw-pitch-roll, 先绕 Z 转, 再 pitch, 最后 roll)
     """
 
     def __init__(self):
@@ -13,11 +14,7 @@ class PoseTransformer:
 
     def pose_to_matrix(self, x, y, z, qx, qy, qz, qw):
         """
-        位姿 (坐标 + 四元数) 转 4x4 变换矩阵
-
-        :param x, y, z: 位置 (米)
-        :param qx, qy, qz, qw: 四元数
-        :return: 4x4 numpy 数组
+        位姿 (坐标 + 四元数) 转 4x4 变换矩阵 (SE(3) 群元素)
         """
         T = np.eye(4)
         T[:3, :3] = R.from_quat([qx, qy, qz, qw]).as_matrix()
@@ -27,9 +24,6 @@ class PoseTransformer:
     def matrix_to_pose(self, T):
         """
         4x4 变换矩阵 转位姿 (坐标 + 四元数)
-
-        :param T: 4x4 numpy 数组
-        :return: (x, y, z, qx, qy, qz, qw)
         """
         x, y, z = T[:3, 3]
         quat = R.from_matrix(T[:3, :3]).as_quat()
@@ -39,10 +33,6 @@ class PoseTransformer:
     def apply_transform(self, current_pose, transform_matrix):
         """
         应用变换矩阵到当前位姿
-
-        :param current_pose: 元组 (wx, y, z, qx, qy, qz, qw)
-        :param transform_matrix: 4x4 numpy 数组
-        :return: 变换后的新位姿 (x, y, z, qx, qy, qz, qw)
         """
         T_current = self.pose_to_matrix(*current_pose)
         T_new = transform_matrix @ T_current
@@ -52,42 +42,39 @@ class PoseTransformer:
 class OffsetTransformer:
     """
     专门处理 odin SLAM 的坐标偏移
-
-    由于 odin (传感器) 不在机器人中心，需要处理两类偏移:
-    1. 传感器到机器人中心的偏移 (T_sensor_to_robot)
-    2. map 坐标系原点的偏移 (T_map_origin_offset)
+    坐标系约定: FLU (front-X, left-Y, up-Z)
+    欧拉角顺序: ZYX (yaw-pitch-roll)
     """
 
     def __init__(self, sensor_offset, map_origin_offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)):
-        """
-        :param sensor_offset: 传感器相对机器人中心的偏移 (x, y, z, roll, pitch, yaw)
-        :param map_origin_offset: map 原点偏移 (x, y, z, roll, pitch, yaw)
-        """
         self.pose_transformer = PoseTransformer()
+        
+        # T_sensor_to_robot: 描述传感器在机器人底盘坐标系中的位姿 (即 T_B^S)
         self.T_sensor_to_robot = self._build_transform(sensor_offset)
+        # T_robot_to_sensor: 描述底盘在传感器坐标系中的位姿 (即 (T_B^S)^-1)
         self.T_robot_to_sensor = self._inverse_transform(self.T_sensor_to_robot)
+        
         self.sensor_offset = sensor_offset
+        self.map_origin_offset = map_origin_offset
+
     @staticmethod
     def _build_transform(offset):
         """
-        从 (x, y, z, roll, pitch, yaw) 构建 4x4 变换矩阵
-
-        :param offset: (x, y, z, roll, pitch, yaw) - 单位: 米 / 弧度
-        :return: 4x4 numpy 数组
+        从 (x, y, z, roll, pitch, yaw) 构建 4x4 变换矩阵。
         """
         x, y, z, roll, pitch, yaw = offset
         T = np.eye(4)
-        T[:3, :3] = R.from_euler('xyz', [roll, pitch, yaw]).as_matrix()
+        
+        # 【核心修复 1】: Scipy API 传参顺序修正
+        # 当指定轴序为 'ZYX' 时，传入的数组必须严格按照 [yaw, pitch, roll] 顺序
+        T[:3, :3] = R.from_euler('ZYX', [yaw, pitch, roll]).as_matrix()
         T[:3, 3] = [x, y, z]
         return T
 
     @staticmethod
     def _inverse_transform(T):
         """
-        计算 4x4 变换矩阵的逆
-
-        :param T: 4x4 numpy 数组
-        :return: T 的逆矩阵
+        计算 SE(3) 矩阵的精确逆 (解析逆)
         """
         T_inv = np.eye(4)
         T_inv[:3, :3] = T[:3, :3].T
@@ -96,47 +83,33 @@ class OffsetTransformer:
 
     def odom_to_map_with_offset(self, odom_pose, tf_odom_to_map):
         """
-        完整坐标变换: odom -> map，并考虑传感器偏移和 map 原点偏移
-
-        变换链: P_robot_in_map = T_mo @ T_om @ T_ro @ P_robot_in_odom
-
-        其中 P_robot_in_odom = P_sensor_in_odom @ inv(T_sensor_to_robot)
-        因为 SLAM 给出的是传感器位姿，需要通过传感器偏移的逆变换得到机器人位姿
-
-        :param odom_pose: odin 在 odom 坐标系下的位姿 (x, y, z, qx, qy, qz, qw)
-        :param tf_odom_to_map: odom 到 map 的 tf 变换矩阵 (从 TF 树获取)
-        :return: 变换后的 map 坐标系下的位姿 (x, y, z, qx, qy, qz, qw)
+        终极坐标变换：将 SLAM 颠倒的全局坐标系，彻底翻转并映射为符合机器人底盘直觉的 User Map。
         """
-        T_sensor_in_odom = self.pose_transformer.pose_to_matrix(*odom_pose) @ self.T_robot_to_sensor 
-        sensor_state = list(self.pose_transformer.matrix_to_pose(T_sensor_in_odom))
-        roll, pitch, yaw = R.from_quat([sensor_state[3], sensor_state[4], sensor_state[5], sensor_state[6]]).as_euler('xyz', degrees=False)
-        sensor_state[0] = sensor_state[0] 
-        sensor_state[1] = sensor_state[1] 
-        sensor_state[2] = sensor_state[2]
-        T_robot_in_odom = self.pose_transformer.pose_to_matrix(*sensor_state)
-        T_total = tf_odom_to_map @ T_robot_in_odom
-        return self.pose_transformer.matrix_to_pose(T_total)
+        # 1. 提取传感器在 Odom 下的局部相对位姿
+        T_sensor_in_odom = self.pose_transformer.pose_to_matrix(*odom_pose)
+
+        # 2. 组合 TF，得到传感器在 SLAM Map 中的绝对位姿 (T_slam_map_to_sensor)
+        T_sensor_in_slam_map = tf_odom_to_map @ T_sensor_in_odom
+
+        # 3. 【核心数学重构：全局共轭变换】
+        # 将整个 SLAM 的绝对位姿，通过外参共轭映射，强行转换到以车头为基准的世界坐标系中。
+        # 公式: T_user_map = T_base_to_sensor * T_slam_pose * T_sensor_to_base
+        T_robot_in_user_map = self.T_sensor_to_robot @ T_sensor_in_slam_map @ self.T_robot_to_sensor
+
+        # 4. 应用可能的用户自定义 Map 原点偏移
+        T_mo = self._build_transform(self.map_origin_offset)
+        T_final = T_mo @ T_robot_in_user_map
+
+        x, y, z, qx, qy, qz, qw = self.pose_transformer.matrix_to_pose(T_final)
+
+        return x, y, z, qx, qy, qz, qw
 
     def transform_point(self, point, tf_matrix):
-        """
-        变换单个点 (无旋转分量)
-
-        :param point: (x, y, z)
-        :param tf_matrix: 4x4 变换矩阵
-        :return: 变换后的点 (x, y, z)
-        """
         p_homogeneous = np.array([point[0], point[1], point[2], 1.0])
         p_transformed = tf_matrix @ p_homogeneous
         return p_transformed[:3]
 
     def transform_point_cloud(self, points, tf_matrix):
-        """
-        批量变换点云
-
-        :param points: Nx3 numpy 数组
-        :param tf_matrix: 4x4 变换矩阵
-        :return: 变换后的点云 Nx3
-        """
         points_homogeneous = np.hstack([points, np.ones((points.shape[0], 1))])
         transformed = (tf_matrix @ points_homogeneous.T).T
         return transformed[:, :3]

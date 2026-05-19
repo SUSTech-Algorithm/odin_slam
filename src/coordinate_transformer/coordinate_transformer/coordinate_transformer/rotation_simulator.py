@@ -37,6 +37,9 @@ def simulate_rotation_animation(
     robot_center_world = []
     sensor_world = []
     compensated = []
+    robot_yaw_list = []   # 机器人真值 yaw
+    sensor_yaw_list = []  # 传感器 yaw
+    comp_yaw_list = []    # 补偿后 yaw
 
     tf_odom_to_map = np.eye(4)
     T_world_to_map = offset_transformer._build_transform(map_origin_offset)
@@ -44,7 +47,7 @@ def simulate_rotation_animation(
     for angle in angles:
         robot_x = rotation_center_x + rotation_radius * np.cos(angle)
         robot_y = rotation_center_y + rotation_radius * np.sin(angle)
-        robot_yaw = angle + np.pi / 2
+        robot_yaw = angle  # heading 0 = +X (FLU: front-X, left-Y, up-Z)
 
         offset_x, offset_y, offset_z = sensor_offset[0], sensor_offset[1], sensor_offset[2]
         cos_yaw, sin_yaw = np.cos(robot_yaw), np.sin(robot_yaw)
@@ -55,7 +58,7 @@ def simulate_rotation_animation(
 
         offset_yaw = sensor_offset[5]
         total_yaw = robot_yaw + offset_yaw
-        sensor_q = R.from_euler('z', total_yaw).as_quat()
+        sensor_q = R.from_euler('Z', total_yaw).as_quat()
         sqx, sqy, sqz, sqw = sensor_q
 
         robot_center_world.append([robot_x, robot_y, 0.0])
@@ -66,10 +69,18 @@ def simulate_rotation_animation(
             tf_odom_to_map
         )
         compensated.append(result)
+        robot_yaw_list.append(robot_yaw)
+        sensor_yaw_list.append(total_yaw)
+        comp_yaw_list.append(
+            R.from_quat([result[3], result[4], result[5], result[6]]).as_euler('ZYX', degrees=False)[0]
+        )
 
     robot_center_world = np.array(robot_center_world)
     sensor_world = np.array(sensor_world)
     compensated = np.array(compensated)
+    robot_yaw_list = np.array(robot_yaw_list)
+    sensor_yaw_list = np.array(sensor_yaw_list)
+    comp_yaw_list = np.array(comp_yaw_list)
 
     ground_truth_in_map = offset_transformer.transform_point_cloud(
         robot_center_world, T_world_to_map
@@ -89,58 +100,77 @@ def simulate_rotation_animation(
     map_center_x = rotation_center_x + map_origin[0]
     map_center_y = rotation_center_y + map_origin[1]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
     fig.suptitle(
-        f'Rotation Simulation (radius={rotation_radius}m, sensor_offset=({sensor_offset[0]}, {sensor_offset[1]}m))',
+        f'Rotation Simulation (radius={rotation_radius}m, sensor_offset=({sensor_offset[0]}, {sensor_offset[1]}m), yaw_offset={sensor_offset[5]:.3f}rad)',
         fontsize=13
     )
 
-    # ---- 图1：2D 轨迹 ----
-    ax1 = axes[0]
+    ax1, ax2 = axes[0]
+    ax3, ax4 = axes[1]
+
+    # ================================================================
+    # ---- 图1：2D 轨迹 + 方向箭头 ----
+    # ================================================================
     ax1.set_xlabel('X (m)')
     ax1.set_ylabel('Y (m)')
-    ax1.set_title('2D Trajectory')
+    ax1.set_title('2D Trajectory with Heading')
     ax1.grid(True, alpha=0.3)
+    ax1.set_aspect('equal')
 
-    # 预计算数据范围，防止 blit+equal 模式下 autoscaling 失效
     all_x = np.concatenate([robot_center_world[:, 0], sensor_world[:, 0], compensated[:, 0], ground_truth_in_map[:, 0]])
     all_y = np.concatenate([robot_center_world[:, 1], sensor_world[:, 1], compensated[:, 1], ground_truth_in_map[:, 1]])
-    x_margin = (np.ptp(all_x) * 0.15) + 0.5
-    y_margin = (np.ptp(all_y) * 0.15) + 0.5
+    x_margin = (np.ptp(all_x) * 0.15) + 0.6
+    y_margin = (np.ptp(all_y) * 0.15) + 0.6
     ax1.set_xlim(all_x.min() - x_margin, all_x.max() + x_margin)
     ax1.set_ylim(all_y.min() - y_margin, all_y.max() + y_margin)
 
-    (line_robot_gt,) = ax1.plot([], [], 'b-', linewidth=2, alpha=0.8, label='Robot center (ground truth)')
-    (line_sensor_gt,) = ax1.plot([], [], 'r--', linewidth=1.5, alpha=0.7, label='Sensor (ground truth, no compensation)')
+    (line_robot_gt,) = ax1.plot([], [], 'b-', linewidth=2, alpha=0.7, label='Robot center (truth)')
+    (line_sensor_gt,) = ax1.plot([], [], 'r--', linewidth=1.5, alpha=0.7, label='Sensor (truth)')
     (line_comp,) = ax1.plot([], [], 'm-', linewidth=2, alpha=0.9, label='Compensated (output)')
-    (line_gt_map,) = ax1.plot([], [], 'c:', linewidth=2, alpha=0.9, label='Ground truth (map)')
+    (line_gt_map,) = ax1.plot([], [], 'c:', linewidth=1.5, alpha=0.7, label='Ground truth (map)')
 
-    ax1.scatter([], [], c='black', s=250, marker='+', linewidths=3, label='Rotation center')
-    if map_origin[0] != 0 or map_origin[1] != 0:
-        ax1.scatter([], [], c='green', s=250, marker='+', linewidths=3, label='Map origin offset')
+    ax1.scatter([], [], c='black', s=300, marker='+', linewidths=3, label='Rotation center')
 
+    arrow_len = 0.3
+    arrow_scale = 1.0
+
+    # 预创建 quiver 箭头（blit 兼容）
+    q_robot = ax1.quiver([0], [0], [0], [0], color='blue', scale=arrow_scale,
+                         units='width', width=0.005, headwidth=4, headlength=5)
+    q_sensor = ax1.quiver([0], [0], [0], [0], color='red', scale=arrow_scale,
+                          units='width', width=0.005, headwidth=4, headlength=5)
+    q_comp = ax1.quiver([0], [0], [0], [0], color='magenta', scale=arrow_scale,
+                        units='width', width=0.005, headwidth=4, headlength=5)
+
+    # 小三角标记当前位置
     (sc_robot_curr,) = ax1.plot([], [], 'bo', ms=10, zorder=10, label='Robot current')
     (sc_sensor_curr,) = ax1.plot([], [], 'r^', ms=8, zorder=10, label='Sensor current')
     (sc_comp_curr,) = ax1.plot([], [], 'ms', ms=8, zorder=10, label='Compensated current')
 
-    # 偏移向量箭头（固定在四分之一位置）
     arrow_idx = num_steps // 4
-    arrow = ax1.annotate('',
+    ax1.annotate('',
         xy=(robot_center_world[arrow_idx, 0], robot_center_world[arrow_idx, 1]),
         xytext=(sensor_world[arrow_idx, 0], sensor_world[arrow_idx, 1]),
         arrowprops=dict(arrowstyle='->', color='orange', lw=2))
-    ax1.text(0, 0, 'Sensor offset', color='orange', fontsize=9, ha='center')
+    ax1.text(0.02, 0.02, 'Sensor offset', color='orange', fontsize=9,
+             ha='left', transform=ax1.transAxes,
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
 
     ax1.legend(loc='upper right', fontsize=8)
 
+    info_text = ax1.text(0.02, 0.98, '', transform=ax1.transAxes,
+                         fontsize=9, verticalalignment='top',
+                         bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9))
+
+    # ================================================================
     # ---- 图2：半径分析 ----
-    ax2 = axes[1]
+    # ================================================================
     ax2.set_xlabel('Rotation angle (deg)')
     ax2.set_ylabel('Distance to rotation center (m)')
     ax2.set_title('Radius Analysis')
     ax2.grid(True, alpha=0.3)
     ax2.set_xlim(-5, 365)
-    ax2.set_ylim(0, max(rotation_radius * 1.3, abs(sensor_offset[0]) * 1.3) if sensor_offset[0] != 0 else rotation_radius * 1.3)
 
     dist_robot = np.sqrt(
         (robot_center_world[:, 0] - rotation_center_x)**2 +
@@ -165,8 +195,9 @@ def simulate_rotation_animation(
     (dot_s,) = ax2.plot([], [], 'r^', ms=7)
     (dot_c,) = ax2.plot([], [], 'ms', ms=7)
 
-    # ---- 图3：误差分析 ----
-    ax3 = axes[2]
+    # ================================================================
+    # ---- 图3：位置误差分析 ----
+    # ================================================================
     ax3.set_xlabel('Rotation angle (deg)')
     ax3.set_ylabel('Position error (cm)')
     ax3.set_title('Position Error vs Ground Truth')
@@ -177,9 +208,9 @@ def simulate_rotation_animation(
     ax3.set_ylim(-max_err * 0.05, max_err * 1.15)
 
     ax3.plot(np.degrees(angles), error_naive * 100, 'r-', linewidth=2,
-             label=f'Without compensation (max={np.max(error_naive)*100:.2f}cm)')
+             label=f'Without comp (max={np.max(error_naive)*100:.2f}cm)')
     ax3.plot(np.degrees(angles), error_compensated * 100, 'm-', linewidth=2,
-             label=f'With compensation (max={np.max(error_compensated)*100:.2f}cm)')
+             label=f'With comp (max={np.max(error_compensated)*100:.2f}cm)')
     ax3.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
     ax3.legend(fontsize=9)
 
@@ -187,10 +218,34 @@ def simulate_rotation_animation(
     (dot_naive3,) = ax3.plot([], [], 'ro', ms=8)
     (dot_comp3,) = ax3.plot([], [], 'ms', ms=8)
 
-    # ---- 文字信息面板 ----
-    info_text = ax1.text(0.02, 0.02, '', transform=ax1.transAxes,
-                         fontsize=9, verticalalignment='bottom',
-                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    # ================================================================
+    # ---- 图4：航向角时序图 ----
+    # ================================================================
+    ax4.set_xlabel('Rotation angle (deg)')
+    ax4.set_ylabel('Heading / Yaw (deg)')
+    ax4.set_title('Heading (Yaw) vs Rotation Angle')
+    ax4.grid(True, alpha=0.3)
+    ax4.set_xlim(-5, 365)
+
+    ax4.plot(np.degrees(angles), np.degrees(robot_yaw_list), 'b-', linewidth=2,
+             label='Robot yaw (ground truth)')
+    ax4.plot(np.degrees(angles), np.degrees(sensor_yaw_list), 'r--', linewidth=1.5,
+             alpha=0.7, label='Sensor yaw (SLAM input)')
+    ax4.plot(np.degrees(angles), np.degrees(comp_yaw_list), 'm-', linewidth=2,
+             alpha=0.9, label='Compensated yaw (output)')
+
+    yaw_max = np.max(np.abs(np.degrees(comp_yaw_list))) * 1.2
+    ax4.set_ylim(-yaw_max, yaw_max if yaw_max > 0 else 380)
+    ax4.legend(fontsize=9)
+
+    (vline4,) = ax4.plot([], [], 'k-', linewidth=2)
+    (dot_yaw_gt,) = ax4.plot([], [], 'bo', ms=8)
+    (dot_yaw_sensor,) = ax4.plot([], [], 'r^', ms=7)
+    (dot_yaw_comp,) = ax4.plot([], [], 'ms', ms=7)
+
+    yaw_error = np.degrees(comp_yaw_list) - np.degrees(robot_yaw_list)
+    # 缠绕到 [-180, 180]
+    yaw_error = ((yaw_error + 180) % 360) - 180
 
     def init():
         line_robot_gt.set_data([], [])
@@ -202,19 +257,23 @@ def simulate_rotation_animation(
         sc_comp_curr.set_data([], [])
         vline.set_data([], [])
         vline3.set_data([], [])
+        vline4.set_data([], [])
+        q_robot.set_UVC([0], [0])
+        q_sensor.set_UVC([0], [0])
+        q_comp.set_UVC([0], [0])
         info_text.set_text('')
         return [
             line_robot_gt, line_sensor_gt, line_comp, line_gt_map,
             sc_robot_curr, sc_sensor_curr, sc_comp_curr,
-            vline, vline3, info_text
+            q_robot, q_sensor, q_comp,
+            vline, dot_r, dot_s, dot_c,
+            vline3, dot_naive3, dot_comp3,
+            vline4, dot_yaw_gt, dot_yaw_sensor, dot_yaw_comp,
+            info_text
         ]
 
     def animate(i):
-        i_wrap = i % num_steps  # 循环播放
-
-        robot_trail = robot_center_world[:i_wrap + 1]
-        sensor_trail = sensor_world[:i_wrap + 1]
-        comp_trail = compensated[:i_wrap + 1]
+        i_wrap = i % num_steps
 
         line_robot_gt.set_data(robot_center_world[:i_wrap + 1, 0],
                                robot_center_world[:i_wrap + 1, 1])
@@ -232,6 +291,21 @@ def simulate_rotation_animation(
         sc_comp_curr.set_data([compensated[i_wrap, 0]],
                               [compensated[i_wrap, 1]])
 
+        # 用 quiver 更新方向箭头
+        rx, ry = robot_center_world[i_wrap, 0], robot_center_world[i_wrap, 1]
+        sx, sy = sensor_world[i_wrap, 0], sensor_world[i_wrap, 1]
+        cx, cy = compensated[i_wrap, 0], compensated[i_wrap, 1]
+        ryaw = robot_yaw_list[i_wrap]
+        syaw = sensor_yaw_list[i_wrap]
+        cyaw = comp_yaw_list[i_wrap]
+
+        q_robot.set_UVC([arrow_len * np.cos(ryaw)], [arrow_len * np.sin(ryaw)])
+        q_robot.set_offsets([[rx, ry]])
+        q_sensor.set_UVC([arrow_len * np.cos(syaw)], [arrow_len * np.sin(syaw)])
+        q_sensor.set_offsets([[sx, sy]])
+        q_comp.set_UVC([arrow_len * np.cos(cyaw)], [arrow_len * np.sin(cyaw)])
+        q_comp.set_offsets([[cx, cy]])
+
         vline.set_data([np.degrees(angles[i_wrap]), np.degrees(angles[i_wrap])], [0, 1])
         dot_r.set_data([np.degrees(angles[i_wrap])], [dist_robot[i_wrap]])
         dot_s.set_data([np.degrees(angles[i_wrap])], [dist_sensor[i_wrap]])
@@ -241,10 +315,18 @@ def simulate_rotation_animation(
         dot_naive3.set_data([np.degrees(angles[i_wrap])], [error_naive[i_wrap] * 100])
         dot_comp3.set_data([np.degrees(angles[i_wrap])], [error_compensated[i_wrap] * 100])
 
+        vline4.set_data([np.degrees(angles[i_wrap]), np.degrees(angles[i_wrap])], [-400, 400])
+        dot_yaw_gt.set_data([np.degrees(angles[i_wrap])], [np.degrees(robot_yaw_list[i_wrap])])
+        dot_yaw_sensor.set_data([np.degrees(angles[i_wrap])], [np.degrees(sensor_yaw_list[i_wrap])])
+        dot_yaw_comp.set_data([np.degrees(angles[i_wrap])], [np.degrees(comp_yaw_list[i_wrap])])
+
         info_text.set_text(
             f'Angle: {np.degrees(angles[i_wrap]):.1f}°\n'
-            f'Comp error: {error_compensated[i_wrap]*100:.3f} cm\n'
-            f'Naive error: {error_naive[i_wrap]*100:.3f} cm'
+            f'Robot yaw: {np.degrees(robot_yaw_list[i_wrap]):.1f}°\n'
+            f'Sensor yaw: {np.degrees(sensor_yaw_list[i_wrap]):.1f}°\n'
+            f'Comp yaw: {np.degrees(comp_yaw_list[i_wrap]):.1f}°\n'
+            f'Yaw err: {yaw_error[i_wrap]:.2f}°\n'
+            f'Pos err: {error_compensated[i_wrap]*100:.3f} cm'
         )
 
         return [
@@ -252,6 +334,7 @@ def simulate_rotation_animation(
             sc_robot_curr, sc_sensor_curr, sc_comp_curr,
             vline, dot_r, dot_s, dot_c,
             vline3, dot_naive3, dot_comp3,
+            vline4, dot_yaw_gt, dot_yaw_sensor, dot_yaw_comp,
             info_text
         ]
 
@@ -288,6 +371,8 @@ def simulate_rotation_animation(
         print(f"Compensation IMPROVES accuracy by {improvement:.1f}%")
     else:
         print(f"Compensation worsens accuracy by {-improvement:.1f}%")
+    print("="*65)
+    print(f"Yaw error (comp vs truth) - max: {np.max(np.abs(yaw_error)):.3f} deg,  mean: {np.mean(np.abs(yaw_error)):.3f} deg")
     print("="*65)
 
 

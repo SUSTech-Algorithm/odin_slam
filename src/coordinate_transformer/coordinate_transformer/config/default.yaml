@@ -13,7 +13,7 @@ coordinate_transformer:
     # (x, y, z) 单位: 米
     # (roll, pitch, yaw) 单位: 弧度
     # 根据实际测量填写，odin (传感器) 相对于机器人中心的位置
-    sensor_offset: [-0.35, 0.0, 0.0, 0.0, 0.0, 3.141592653589]
+    sensor_offset: [-0.37, 0.0, 0.0, 0.0, 0.0, 3.141592653589]
 
     # ============================================
     # map 坐标系原点偏移
@@ -43,10 +43,14 @@ coordinate_transformer:
     odin_pose_topic: '/odin1/odometry_highfreq'
 
     # 输出: 转换后的位姿话题
-    output_pose_topic: '/odin1/relocation'
+    output_pose_topic: '/odin1/relocation_1'
 
     # ============================================
     # 发布选项
     # ============================================
     # 是否发布转换后的位姿
     publish_transformed_pose: True
+
+    # 发布频率 (Hz)，与输入消息频率解耦
+    # 根据下游节点的需求调整，默认 10Hz
+    publish_rate: 10.0
