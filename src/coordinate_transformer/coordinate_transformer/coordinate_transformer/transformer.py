@@ -44,15 +44,22 @@ class OffsetTransformer:
     专门处理 odin SLAM 的坐标偏移
     坐标系约定: FLU (front-X, left-Y, up-Z)
     欧拉角顺序: ZYX (yaw-pitch-roll)
+
+    sensor_offset 表示 Odin 传感器坐标系在机器人中心/base_link 坐标系下的位姿，
+    即 T_robot_sensor。输出位姿为机器人中心/base_link 在 map 坐标系下的位姿。
     """
 
     def __init__(self, sensor_offset, map_origin_offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)):
         self.pose_transformer = PoseTransformer()
-        
-        # T_sensor_to_robot: 描述传感器在机器人底盘坐标系中的位姿 (即 T_B^S)
-        self.T_sensor_to_robot = self._build_transform(sensor_offset)
-        # T_robot_to_sensor: 描述底盘在传感器坐标系中的位姿 (即 (T_B^S)^-1)
-        self.T_robot_to_sensor = self._inverse_transform(self.T_sensor_to_robot)
+
+        # T_robot_sensor: 传感器坐标系在机器人中心/base_link 坐标系下的位姿。
+        self.T_robot_sensor = self._build_transform(sensor_offset)
+        # T_sensor_robot: 机器人中心/base_link 坐标系在传感器坐标系下的位姿。
+        self.T_sensor_robot = self._inverse_transform(self.T_robot_sensor)
+
+        # 兼容旧字段名，避免外部调试脚本直接访问属性时报错。
+        self.T_sensor_to_robot = self.T_robot_sensor
+        self.T_robot_to_sensor = self.T_sensor_robot
         
         self.sensor_offset = sensor_offset
         self.map_origin_offset = map_origin_offset
@@ -83,22 +90,24 @@ class OffsetTransformer:
 
     def odom_to_map_with_offset(self, odom_pose, tf_odom_to_map):
         """
-        终极坐标变换：将 SLAM 颠倒的全局坐标系，彻底翻转并映射为符合机器人底盘直觉的 User Map。
+        将 Odin 传感器位姿转换为 map 坐标系下的机器人中心/base_link 位姿。
+
+        变换链:
+            T_map_sensor = T_map_odom @ T_odom_sensor
+            T_map_robot = T_map_sensor @ T_sensor_robot
         """
-        # 1. 提取传感器在 Odom 下的局部相对位姿
+        # 1. 提取传感器在 odom 下的位姿。
         T_sensor_in_odom = self.pose_transformer.pose_to_matrix(*odom_pose)
 
-        # 2. 组合 TF，得到传感器在 SLAM Map 中的绝对位姿 (T_slam_map_to_sensor)
-        T_sensor_in_slam_map = tf_odom_to_map @ T_sensor_in_odom
+        # 2. 组合 TF，得到传感器在 map 中的位姿。
+        T_sensor_in_map = tf_odom_to_map @ T_sensor_in_odom
 
-        # 3. 【核心数学重构：全局共轭变换】
-        # 将整个 SLAM 的绝对位姿，通过外参共轭映射，强行转换到以车头为基准的世界坐标系中。
-        # 公式: T_user_map = T_base_to_sensor * T_slam_pose * T_sensor_to_base
-        T_robot_in_user_map = self.T_sensor_to_robot @ T_sensor_in_slam_map @ self.T_robot_to_sensor
+        # 3. 同一个 map 坐标系内，把传感器位姿换算成机器人中心/base_link 位姿。
+        T_robot_in_map = T_sensor_in_map @ self.T_sensor_robot
 
         # 4. 应用可能的用户自定义 Map 原点偏移
         T_mo = self._build_transform(self.map_origin_offset)
-        T_final = T_mo @ T_robot_in_user_map
+        T_final = T_mo @ T_robot_in_map
 
         x, y, z, qx, qy, qz, qw = self.pose_transformer.matrix_to_pose(T_final)
 

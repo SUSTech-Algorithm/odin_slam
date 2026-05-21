@@ -18,8 +18,8 @@ class CoordinateTransformer(Node):
     坐标转换节点
 
     功能:
-    1. 订阅 odom 坐标系下的 odin 位姿，转换为 map 坐标系
-    2. 支持传感器到机器人中心的偏移补偿
+    1. 订阅 odom 坐标系下的 Odin 传感器位姿，转换为 map 坐标系
+    2. 支持根据安装外参换算机器人中心/base_link 位姿
     3. 支持 map 原点偏移调整
     """
 
@@ -124,7 +124,7 @@ class CoordinateTransformer(Node):
 
             # 执行完整坐标变换，缓存结果
             self.latest_map_pose = self.transformer.odom_to_map_with_offset(odom_pose, tf_matrix)
-            self.latest_stamp = self.get_clock().now().to_msg()
+            self.latest_stamp = msg.header.stamp
 
         except LookupException as e:
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5)

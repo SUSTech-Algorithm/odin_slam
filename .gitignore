@@ -4,4 +4,6 @@ log
 .catkin_workspace
 .catkin_tools
 ros.zip
-ros/
+rosbag*
+.codex
+.agents
