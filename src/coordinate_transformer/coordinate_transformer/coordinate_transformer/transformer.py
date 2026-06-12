@@ -46,15 +46,25 @@ class OffsetTransformer:
     欧拉角顺序: ZYX (yaw-pitch-roll)
 
     sensor_offset 表示 Odin 传感器坐标系在机器人中心/base_link 坐标系下的位姿，
-    即 T_base_sensor。输出位姿为机器人中心/base_link 在 map 坐标系下的位姿。
+    即 T_base_sensor。odom_orientation_frame 控制 odometry orientation 的语义:
+    - sensor: odometry pose 是传感器坐标系位姿，输出姿态会应用完整外参旋转。
+    - base: odometry orientation 已经是 base_link 朝向，只修正传感器原点平移。
     """
 
-    def __init__(self, sensor_offset, map_origin_offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)):
+    def __init__(
+        self,
+        sensor_offset,
+        map_origin_offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        odom_orientation_frame='sensor',
+    ):
         self.pose_transformer = PoseTransformer()
+        if odom_orientation_frame not in ('sensor', 'base'):
+            raise ValueError('odom_orientation_frame must be "sensor" or "base"')
 
         # T_base_sensor: 传感器坐标系在机器人中心/base_link 坐标系下的位姿。
         self.T_base_sensor = self._build_transform(sensor_offset)
         self.T_sensor_base = self._inverse_transform(self.T_base_sensor)
+        self.t_base_sensor = self.T_base_sensor[:3, 3].copy()
 
         # 兼容旧字段名，避免外部调试脚本直接访问属性时报错。
         self.T_robot_sensor = self.T_base_sensor
@@ -64,6 +74,7 @@ class OffsetTransformer:
 
         self.sensor_offset = sensor_offset
         self.map_origin_offset = map_origin_offset
+        self.odom_orientation_frame = odom_orientation_frame
 
     @staticmethod
     def _build_transform(offset):
@@ -99,8 +110,15 @@ class OffsetTransformer:
         # T_map_sensor = T_map_odom @ T_odom_sensor
         T_map_sensor = tf_odom_to_map @ T_odom_sensor
 
-        # T_map_base = T_map_sensor @ T_sensor_base
-        T_map_base = T_map_sensor @ self.T_sensor_base
+        if self.odom_orientation_frame == 'base':
+            T_map_base = T_map_sensor.copy()
+            T_map_base[:3, 3] = (
+                T_map_sensor[:3, 3]
+                - T_map_sensor[:3, :3] @ self.t_base_sensor
+            )
+        else:
+            # T_map_base = T_map_sensor @ T_sensor_base
+            T_map_base = T_map_sensor @ self.T_sensor_base
 
         T_mo = self._build_transform(self.map_origin_offset)
         T_final = T_mo @ T_map_base

@@ -159,16 +159,23 @@ def build_map_sensor_samples(odom_samples, tf_samples, max_tf_gap):
     return np.stack(map_sensor)
 
 
-def calibrate_x(t_map_sensor_samples, sensor_offset):
+def calibrate_x(t_map_sensor_samples, sensor_offset, odom_orientation_frame='sensor'):
     """Estimate sensor_offset.x by minimizing robot-center position variance."""
+    if odom_orientation_frame not in ('sensor', 'base'):
+        raise ValueError('odom_orientation_frame must be "sensor" or "base"')
+
     sensor_offset = np.array(sensor_offset, dtype=float)
     fixed_offset = sensor_offset.copy()
     fixed_offset[0] = 0.0
 
     t_base_sensor_fixed = OffsetTransformer._build_transform(fixed_offset)
-    r_sensor_base = t_base_sensor_fixed[:3, :3].T
     fixed_translation = t_base_sensor_fixed[:3, 3]
     x_axis = np.array([1.0, 0.0, 0.0])
+    if odom_orientation_frame == 'sensor':
+        r_sensor_base = t_base_sensor_fixed[:3, :3].T
+        fixed_rotation = r_sensor_base
+    else:
+        fixed_rotation = np.eye(3)
 
     q_values = []
     v_values = []
@@ -178,8 +185,8 @@ def calibrate_x(t_map_sensor_samples, sensor_offset):
     for t_map_sensor in t_map_sensor_samples:
         r_map_sensor = t_map_sensor[:3, :3]
         p_map_sensor = t_map_sensor[:3, 3]
-        q_values.append(p_map_sensor - r_map_sensor @ r_sensor_base @ fixed_translation)
-        v_values.append(r_map_sensor @ r_sensor_base @ x_axis)
+        q_values.append(p_map_sensor - r_map_sensor @ fixed_rotation @ fixed_translation)
+        v_values.append(r_map_sensor @ fixed_rotation @ x_axis)
         raw_positions.append(p_map_sensor)
         yaws.append(R.from_matrix(r_map_sensor).as_euler('ZYX')[0])
 
@@ -241,6 +248,7 @@ def parse_args():
     parser.add_argument('--tf-topic', default='/tf')
     parser.add_argument('--source-frame', default=None)
     parser.add_argument('--target-frame', default=None)
+    parser.add_argument('--odom-orientation-frame', choices=['sensor', 'base'], default=None)
     parser.add_argument('--max-tf-gap', type=float, default=0.2)
     return parser.parse_args()
 
@@ -251,6 +259,10 @@ def main():
     data, params = read_template(args.params_file)
     args.source_frame = args.source_frame or params.get('source_frame', 'odom')
     args.target_frame = args.target_frame or params.get('target_frame', 'map')
+    odom_orientation_frame = (
+        args.odom_orientation_frame
+        or params.get('odom_orientation_frame', 'sensor')
+    )
 
     sensor_offset = params.get('sensor_offset', [0.0] * 6)
     if len(sensor_offset) != 6:
@@ -262,7 +274,11 @@ def main():
         tf_samples,
         args.max_tf_gap,
     )
-    result = calibrate_x(t_map_sensor_samples, sensor_offset)
+    result = calibrate_x(
+        t_map_sensor_samples,
+        sensor_offset,
+        odom_orientation_frame=odom_orientation_frame,
+    )
     write_calibrated_yaml(data, params, result, args.output)
 
     print(f'Calibrated sensor_offset.x: {result["x"]:.6f} m')

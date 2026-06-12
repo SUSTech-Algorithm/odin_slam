@@ -13,7 +13,8 @@ coordinate_transformer:
     # (x, y, z) 单位: 米
     # (roll, pitch, yaw) 单位: 弧度
     # x > 0 表示 odin (传感器) 在机器人中心/base_link 前方
-    sensor_offset: [-0.3950, 0.0, 0.0, 0.0, 0.0, 3.141592653589]
+    # yaw = pi 表示传感器物理坐标系与机器人坐标系相差 180 度
+    sensor_offset: [0.394966, 0.0, 0.0, 0.0, 0.0, 3.141592653589]
 
     # ============================================
     # map 坐标系原点偏移
@@ -35,6 +36,11 @@ coordinate_transformer:
 
     # 等待 TF 变换的超时时间 (秒)
     tf_timeout: 0.05
+
+    # sensor: odometry orientation 是传感器坐标系朝向，会应用完整外参旋转到输出
+    # base: odometry orientation 已经是 base_link 朝向，只用平移外参修正位置
+    # 当前 Odin odometry 更符合 base 语义，避免输出姿态重复多转 180 度
+    odom_orientation_frame: 'base'
 
     # ============================================
     # Topic 名称配置

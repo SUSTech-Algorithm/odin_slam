@@ -39,6 +39,7 @@ class CoordinateTransformer(Node):
                 ('source_frame', 'odom'),
                 ('target_frame', 'map'),
                 ('tf_timeout', 1.0),
+                ('odom_orientation_frame', 'base'),
                 ('odin_pose_topic', '/odin_odom'),
                 ('output_pose_topic', '/transformed/pose'),
                 ('publish_transformed_pose', True),
@@ -51,6 +52,9 @@ class CoordinateTransformer(Node):
         self.source_frame = self.get_parameter('coordinate_transformer.source_frame').value
         self.target_frame = self.get_parameter('coordinate_transformer.target_frame').value
         self.tf_timeout = self.get_parameter('coordinate_transformer.tf_timeout').value
+        odom_orientation_frame = self.get_parameter(
+            'coordinate_transformer.odom_orientation_frame'
+        ).value
         self.odin_pose_topic = self.get_parameter('coordinate_transformer.odin_pose_topic').value
         self.output_pose_topic = self.get_parameter(
             'coordinate_transformer.output_pose_topic'
@@ -63,7 +67,11 @@ class CoordinateTransformer(Node):
         self.latest_stamp = None
 
         # 初始化变换器
-        self.transformer = OffsetTransformer(sensor_offset, map_origin_offset)
+        self.transformer = OffsetTransformer(
+            sensor_offset,
+            map_origin_offset,
+            odom_orientation_frame=odom_orientation_frame,
+        )
         self.pose_transformer = PoseTransformer()
 
         self.get_logger().info(f"""
@@ -71,6 +79,7 @@ class CoordinateTransformer(Node):
             Sensor offset: {sensor_offset}
             Map origin offset: {map_origin_offset}
             Transform: {self.source_frame} -> {self.target_frame}
+            Odom orientation frame: {odom_orientation_frame}
             Odin pose topic: {self.odin_pose_topic}
             Output pose topic: {self.output_pose_topic}
             Publish rate: {publish_rate}
