@@ -158,7 +158,7 @@ class CoordinateTransformer(Node):
         sin_alpha = self.sensor_offset[1] / radius
         position = [0.0, 0.0, 0.0]
         position[0] = map_pose_position[0] - radius*(cos_alpha - (np.cos(map_pose_yaw)*cos_alpha-np.sin(map_pose_yaw)*sin_alpha)) + self.map_origin_offset[0]
-        position[1] = map_pose_position[1] - radius*(sin_alpha + (np.sin(map_pose_yaw)*cos_alpha-np.cos(map_pose_yaw)*sin_alpha)) + self.map_origin_offset[1]
+        position[1] = map_pose_position[1] + radius*(sin_alpha + (np.sin(map_pose_yaw)*cos_alpha-np.cos(map_pose_yaw)*sin_alpha)) + self.map_origin_offset[1]
         position[2] = map_pose_position[2]
         return position
 
