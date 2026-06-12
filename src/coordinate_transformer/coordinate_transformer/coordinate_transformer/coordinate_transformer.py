@@ -43,7 +43,6 @@ class CoordinateTransformer(Node):
                 ('output_pose_topic', '/transformed/pose'),
                 ('publish_transformed_pose', True),
                 ('publish_rate', 10.0),
-                ('tf_refresh_rate', 1.0),
             ]
         )
 
@@ -58,13 +57,10 @@ class CoordinateTransformer(Node):
         ).value
         publish_pose = self.get_parameter('coordinate_transformer.publish_transformed_pose').value
         publish_rate = self.get_parameter('coordinate_transformer.publish_rate').value
-        tf_refresh_rate = self.get_parameter('coordinate_transformer.tf_refresh_rate').value
 
         # 缓存最新收到的位姿
         self.latest_map_pose = None
         self.latest_stamp = None
-        self.latest_tf_matrix = None
-        self.has_tf_cache = False
 
         # 初始化变换器
         self.transformer = OffsetTransformer(sensor_offset, map_origin_offset)
@@ -78,7 +74,6 @@ class CoordinateTransformer(Node):
             Odin pose topic: {self.odin_pose_topic}
             Output pose topic: {self.output_pose_topic}
             Publish rate: {publish_rate}
-            TF refresh rate: {tf_refresh_rate}
             """)
 
         # 订阅 odin 位姿 (来自 SLAM 的 odom 输出)
@@ -103,15 +98,10 @@ class CoordinateTransformer(Node):
                 self.publish_timer_callback
             )
 
-        self.tf_refresh_timer = self.create_timer(
-            1.0 / tf_refresh_rate,
-            self.tf_refresh_timer_callback
-        )
-
         self.get_logger().info('Coordinate transformer initialized')
 
-    def tf_refresh_timer_callback(self):
-        """Refresh and cache the latest target<-source transform."""
+    def _lookup_latest_transform_matrix(self):
+        """Look up the latest T_target_source matrix."""
         try:
             transform = self.tf_buffer.lookup_transform(
                 self.target_frame,
@@ -119,24 +109,16 @@ class CoordinateTransformer(Node):
                 rclpy.time.Time(),
                 timeout=Duration(seconds=self.tf_timeout)
             )
-            self.latest_tf_matrix = self._transform_to_matrix(transform)
-            self.has_tf_cache = True
+            return self._transform_to_matrix(transform)
         except LookupException as e:
-            self._invalidate_tf_cache()
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5)
         except ExtrapolationException as e:
-            self._invalidate_tf_cache()
             self.get_logger().warn(f'TF extrapolation failed: {e}', throttle_duration_sec=5)
         except ConnectivityException as e:
-            self._invalidate_tf_cache()
             self.get_logger().warn(f'TF connectivity failed: {e}', throttle_duration_sec=5)
-
-    def _invalidate_tf_cache(self):
-        """Clear cached transform and output when the configured TF is unavailable."""
-        self.latest_tf_matrix = None
-        self.has_tf_cache = False
         self.latest_map_pose = None
         self.latest_stamp = None
+        return None
 
     def odin_pose_callback(self, msg: Odometry):
         """处理 odin 位姿，计算并缓存 map 坐标系下的结果"""
@@ -147,11 +129,8 @@ class CoordinateTransformer(Node):
                 throttle_duration_sec=5
             )
 
-        if not self.has_tf_cache:
-            self.get_logger().warn(
-                'Waiting for target<-source TF before publishing transformed pose',
-                throttle_duration_sec=5
-            )
+        tf_matrix = self._lookup_latest_transform_matrix()
+        if tf_matrix is None:
             return
 
         # 提取 SLAM 套件/传感器在 source_frame 下的位姿；child_frame_id 不参与数学计算。
@@ -167,15 +146,14 @@ class CoordinateTransformer(Node):
 
         self.latest_map_pose = self.transformer.odom_to_map_with_offset(
             odom_pose,
-            self.latest_tf_matrix
+            tf_matrix
         )
         self.latest_stamp = msg.header.stamp
 
     def publish_timer_callback(self):
         """定时器回调，按固定频率发布缓存的位姿"""
         if (
-            not self.has_tf_cache
-            or self.latest_map_pose is None
+            self.latest_map_pose is None
             or self.pose_pub is None
         ):
             return
