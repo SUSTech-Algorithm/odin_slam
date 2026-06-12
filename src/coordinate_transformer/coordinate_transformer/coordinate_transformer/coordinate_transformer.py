@@ -43,7 +43,7 @@ class CoordinateTransformer(Node):
                 ('output_pose_topic', '/transformed/pose'),
                 ('publish_transformed_pose', True),
                 ('publish_rate', 10.0),
-                ('use_latest_tf_on_extrapolation', True),
+                ('tf_refresh_rate', 1.0),
             ]
         )
 
@@ -58,13 +58,12 @@ class CoordinateTransformer(Node):
         ).value
         publish_pose = self.get_parameter('coordinate_transformer.publish_transformed_pose').value
         publish_rate = self.get_parameter('coordinate_transformer.publish_rate').value
-        self.use_latest_tf_on_extrapolation = self.get_parameter(
-            'coordinate_transformer.use_latest_tf_on_extrapolation'
-        ).value
+        tf_refresh_rate = self.get_parameter('coordinate_transformer.tf_refresh_rate').value
 
         # 缓存最新收到的位姿
         self.latest_map_pose = None
         self.latest_stamp = None
+        self.latest_tf_matrix = None
 
         # 初始化变换器
         self.transformer = OffsetTransformer(sensor_offset, map_origin_offset)
@@ -77,6 +76,8 @@ class CoordinateTransformer(Node):
             Transform: {self.source_frame} -> {self.target_frame}
             Odin pose topic: {self.odin_pose_topic}
             Output pose topic: {self.output_pose_topic}
+            Publish rate: {publish_rate}
+            TF refresh rate: {tf_refresh_rate}
             """)
 
         # 订阅 odin 位姿 (来自 SLAM 的 odom 输出)
@@ -101,40 +102,23 @@ class CoordinateTransformer(Node):
                 self.publish_timer_callback
             )
 
+        self.tf_refresh_timer = self.create_timer(
+            1.0 / tf_refresh_rate,
+            self.tf_refresh_timer_callback
+        )
+
         self.get_logger().info('Coordinate transformer initialized')
 
-    def odin_pose_callback(self, msg: Odometry):
-        """处理 odin 位姿，计算并缓存 map 坐标系下的结果"""
+    def tf_refresh_timer_callback(self):
+        """Refresh and cache the latest target<-source transform."""
         try:
-            if msg.header.frame_id and msg.header.frame_id != self.source_frame:
-                self.get_logger().warn(
-                    f'Odom message frame_id "{msg.header.frame_id}" does not match '
-                    f'source_frame "{self.source_frame}"',
-                    throttle_duration_sec=5
-                )
-
-            stamp = rclpy.time.Time.from_msg(msg.header.stamp)
-
-            transform = self._lookup_target_source_transform(stamp)
-
-            # 提取 SLAM 套件/传感器在 source_frame 下的位姿；child_frame_id 不参与数学计算。
-            odom_pose = (
-                msg.pose.pose.position.x,
-                msg.pose.pose.position.y,
-                msg.pose.pose.position.z,
-                msg.pose.pose.orientation.x,
-                msg.pose.pose.orientation.y,
-                msg.pose.pose.orientation.z,
-                msg.pose.pose.orientation.w,
+            transform = self.tf_buffer.lookup_transform(
+                self.target_frame,
+                self.source_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=self.tf_timeout)
             )
-
-            # 转换 TF 消息为矩阵
-            tf_matrix = self._transform_to_matrix(transform)
-
-            # 执行完整坐标变换，缓存结果
-            self.latest_map_pose = self.transformer.odom_to_map_with_offset(odom_pose, tf_matrix)
-            self.latest_stamp = msg.header.stamp
-
+            self.latest_tf_matrix = self._transform_to_matrix(transform)
         except LookupException as e:
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5)
         except ExtrapolationException as e:
@@ -142,35 +126,38 @@ class CoordinateTransformer(Node):
         except ConnectivityException as e:
             self.get_logger().warn(f'TF connectivity failed: {e}', throttle_duration_sec=5)
 
-    def _lookup_target_source_transform(self, stamp):
-        """Look up T_target_source, falling back to latest TF for future stamps."""
-        try:
-            return self.tf_buffer.lookup_transform(
-                self.target_frame,
-                self.source_frame,
-                stamp,
-                timeout=Duration(seconds=self.tf_timeout)
-            )
-        except ExtrapolationException as exc:
-            message = str(exc).lower()
-            if (
-                not self.use_latest_tf_on_extrapolation
-                or 'future' not in message
-            ):
-                raise
-
-            latest_transform = self.tf_buffer.lookup_transform(
-                self.target_frame,
-                self.source_frame,
-                rclpy.time.Time(),
-                timeout=Duration(seconds=self.tf_timeout)
-            )
+    def odin_pose_callback(self, msg: Odometry):
+        """处理 odin 位姿，计算并缓存 map 坐标系下的结果"""
+        if msg.header.frame_id and msg.header.frame_id != self.source_frame:
             self.get_logger().warn(
-                'TF lookup used latest available transform because the odom '
-                f'stamp was newer than the latest TF: {exc}',
+                f'Odom message frame_id "{msg.header.frame_id}" does not match '
+                f'source_frame "{self.source_frame}"',
                 throttle_duration_sec=5
             )
-            return latest_transform
+
+        if self.latest_tf_matrix is None:
+            self.get_logger().warn(
+                'Waiting for target<-source TF before publishing transformed pose',
+                throttle_duration_sec=5
+            )
+            return
+
+        # 提取 SLAM 套件/传感器在 source_frame 下的位姿；child_frame_id 不参与数学计算。
+        odom_pose = (
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            msg.pose.pose.position.z,
+            msg.pose.pose.orientation.x,
+            msg.pose.pose.orientation.y,
+            msg.pose.pose.orientation.z,
+            msg.pose.pose.orientation.w,
+        )
+
+        self.latest_map_pose = self.transformer.odom_to_map_with_offset(
+            odom_pose,
+            self.latest_tf_matrix
+        )
+        self.latest_stamp = msg.header.stamp
 
     def publish_timer_callback(self):
         """定时器回调，按固定频率发布缓存的位姿"""

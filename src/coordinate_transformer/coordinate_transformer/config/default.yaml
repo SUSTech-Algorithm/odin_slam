@@ -34,10 +34,10 @@ coordinate_transformer:
     target_frame: 'map'
 
     # 等待 TF 变换的超时时间 (秒)
-    tf_timeout: 1.0
+    tf_timeout: 0.05
 
-    # 当 odom 消息时间戳比最新 TF 更新时，是否退回使用最新可用 TF
-    use_latest_tf_on_extrapolation: True
+    # odom->map 近似低频变换，节点会缓存最新 TF，不在每条 odom 上查询
+    tf_refresh_rate: 1.0
 
     # ============================================
     # Topic 名称配置
