@@ -13,7 +13,7 @@ coordinate_transformer:
     # (x, y, z) 单位: 米
     # (roll, pitch, yaw) 单位: 弧度
     # x > 0 表示 odin (传感器) 在机器人中心前方
-    sensor_offset: [-0.37, 0.0, 0.0, 0.0, 0.0, 3.141592653589]
+    sensor_offset: [-0.3950, 0.0, 0.0, 0.0, 0.0, 3.141592653589]
 
     # ============================================
     # map 坐标系原点偏移
@@ -36,6 +36,9 @@ coordinate_transformer:
     # 等待 TF 变换的超时时间 (秒)
     tf_timeout: 1.0
 
+    # 当 odom 消息时间戳比最新 TF 更新时，是否退回使用最新可用 TF
+    use_latest_tf_on_extrapolation: True
+
     # ============================================
     # Topic 名称配置
     # ============================================
@@ -43,7 +46,7 @@ coordinate_transformer:
     odin_pose_topic: '/odin1/odometry_highfreq'
 
     # 输出: 转换后的位姿话题
-    output_pose_topic: '/odin1/relocation_1'
+    output_pose_topic: '/odin1/relocation'
 
     # ============================================
     # 发布选项
@@ -53,4 +56,4 @@ coordinate_transformer:
 
     # 发布频率 (Hz)，与输入消息频率解耦
     # 根据下游节点的需求调整，默认 10Hz
-    publish_rate: 10.0
+    publish_rate: 100.0

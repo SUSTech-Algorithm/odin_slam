@@ -43,6 +43,7 @@ class CoordinateTransformer(Node):
                 ('output_pose_topic', '/transformed/pose'),
                 ('publish_transformed_pose', True),
                 ('publish_rate', 10.0),
+                ('use_latest_tf_on_extrapolation', True),
             ]
         )
 
@@ -57,6 +58,9 @@ class CoordinateTransformer(Node):
         ).value
         publish_pose = self.get_parameter('coordinate_transformer.publish_transformed_pose').value
         publish_rate = self.get_parameter('coordinate_transformer.publish_rate').value
+        self.use_latest_tf_on_extrapolation = self.get_parameter(
+            'coordinate_transformer.use_latest_tf_on_extrapolation'
+        ).value
 
         # 缓存最新收到的位姿
         self.latest_map_pose = None
@@ -111,13 +115,7 @@ class CoordinateTransformer(Node):
 
             stamp = rclpy.time.Time.from_msg(msg.header.stamp)
 
-            # 获取 source_frame -> target_frame 的 TF2 变换，结果矩阵为 T_target_source
-            transform = self.tf_buffer.lookup_transform(
-                self.target_frame,
-                self.source_frame,
-                stamp,
-                timeout=Duration(seconds=self.tf_timeout)
-            )
+            transform = self._lookup_target_source_transform(stamp)
 
             # 提取 SLAM 套件/传感器在 source_frame 下的位姿；child_frame_id 不参与数学计算。
             odom_pose = (
@@ -143,6 +141,36 @@ class CoordinateTransformer(Node):
             self.get_logger().warn(f'TF extrapolation failed: {e}', throttle_duration_sec=5)
         except ConnectivityException as e:
             self.get_logger().warn(f'TF connectivity failed: {e}', throttle_duration_sec=5)
+
+    def _lookup_target_source_transform(self, stamp):
+        """Look up T_target_source, falling back to latest TF for future stamps."""
+        try:
+            return self.tf_buffer.lookup_transform(
+                self.target_frame,
+                self.source_frame,
+                stamp,
+                timeout=Duration(seconds=self.tf_timeout)
+            )
+        except ExtrapolationException as exc:
+            message = str(exc).lower()
+            if (
+                not self.use_latest_tf_on_extrapolation
+                or 'future' not in message
+            ):
+                raise
+
+            latest_transform = self.tf_buffer.lookup_transform(
+                self.target_frame,
+                self.source_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=self.tf_timeout)
+            )
+            self.get_logger().warn(
+                'TF lookup used latest available transform because the odom '
+                f'stamp was newer than the latest TF: {exc}',
+                throttle_duration_sec=5
+            )
+            return latest_transform
 
     def publish_timer_callback(self):
         """定时器回调，按固定频率发布缓存的位姿"""

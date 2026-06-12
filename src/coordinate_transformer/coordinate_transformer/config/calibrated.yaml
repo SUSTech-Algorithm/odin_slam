@@ -17,6 +17,7 @@ coordinate_transformer:
     source_frame: odom
     target_frame: map
     tf_timeout: 1.0
+    use_latest_tf_on_extrapolation: true
     odin_pose_topic: /odin1/odometry_highfreq
     output_pose_topic: /odin1/relocation_1
     publish_transformed_pose: true
