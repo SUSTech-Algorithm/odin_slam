@@ -5,3 +5,4 @@ log
 .catkin_tools
 ros.zip
 ros/
+rosbag2*

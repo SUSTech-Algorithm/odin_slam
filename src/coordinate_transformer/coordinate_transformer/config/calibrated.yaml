@@ -1,0 +1,23 @@
+coordinate_transformer:
+  ros__parameters:
+    sensor_offset:
+    - -0.39496594770014004
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 3.141592653589
+    map_origin_offset:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    source_frame: odom
+    target_frame: map
+    tf_timeout: 1.0
+    odin_pose_topic: /odin1/odometry_highfreq
+    output_pose_topic: /odin1/relocation_1
+    publish_transformed_pose: true
+    publish_rate: 10.0

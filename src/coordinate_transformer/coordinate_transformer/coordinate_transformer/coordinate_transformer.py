@@ -52,7 +52,9 @@ class CoordinateTransformer(Node):
         self.target_frame = self.get_parameter('coordinate_transformer.target_frame').value
         self.tf_timeout = self.get_parameter('coordinate_transformer.tf_timeout').value
         self.odin_pose_topic = self.get_parameter('coordinate_transformer.odin_pose_topic').value
-        self.output_pose_topic = self.get_parameter('coordinate_transformer.output_pose_topic').value
+        self.output_pose_topic = self.get_parameter(
+            'coordinate_transformer.output_pose_topic'
+        ).value
         publish_pose = self.get_parameter('coordinate_transformer.publish_transformed_pose').value
         publish_rate = self.get_parameter('coordinate_transformer.publish_rate').value
 
@@ -100,15 +102,24 @@ class CoordinateTransformer(Node):
     def odin_pose_callback(self, msg: Odometry):
         """处理 odin 位姿，计算并缓存 map 坐标系下的结果"""
         try:
-            # 获取 odom -> map 的 TF 变换
+            if msg.header.frame_id and msg.header.frame_id != self.source_frame:
+                self.get_logger().warn(
+                    f'Odom message frame_id "{msg.header.frame_id}" does not match '
+                    f'source_frame "{self.source_frame}"',
+                    throttle_duration_sec=5
+                )
+
+            stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+
+            # 获取 source_frame -> target_frame 的 TF2 变换，结果矩阵为 T_target_source
             transform = self.tf_buffer.lookup_transform(
                 self.target_frame,
                 self.source_frame,
-                rclpy.time.Time(),
+                stamp,
                 timeout=Duration(seconds=self.tf_timeout)
             )
 
-            # 提取 odin 在 odom 下的位姿
+            # 提取 SLAM 套件/传感器在 source_frame 下的位姿；child_frame_id 不参与数学计算。
             odom_pose = (
                 msg.pose.pose.position.x,
                 msg.pose.pose.position.y,
@@ -124,7 +135,7 @@ class CoordinateTransformer(Node):
 
             # 执行完整坐标变换，缓存结果
             self.latest_map_pose = self.transformer.odom_to_map_with_offset(odom_pose, tf_matrix)
-            self.latest_stamp = self.get_clock().now().to_msg()
+            self.latest_stamp = msg.header.stamp
 
         except LookupException as e:
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5)
