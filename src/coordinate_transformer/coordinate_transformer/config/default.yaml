@@ -19,11 +19,10 @@ coordinate_transformer:
     # ============================================
     # map 坐标系原点偏移
     # ============================================
-    # 如果需要将 map 坐标系的原点移动到某个位置，在这里设置
-    # 例如: 将原点移动到场地左下角
+    # 用于扣除标定自转时估计出的机器人中心圆心偏置
     # (x, y, z) 单位: 米
     # (roll, pitch, yaw) 单位: 弧度
-    map_origin_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    map_origin_offset: [0.401428, -0.014813, -0.003184, 0.0, 0.0, 0.0]
 
     # ============================================
     # TF 配置
@@ -37,7 +36,7 @@ coordinate_transformer:
     # 等待 TF 变换的超时时间 (秒)
     tf_timeout: 0.05
 
-    # planar: 平面机器人模型，y 固定为 0，位置和 yaw 用显式公式补偿
+    # planar: 平面机器人模型，y 固定为 0；yaw 只影响平移补偿方向，不改输出角度
     # sensor: odometry orientation 是传感器坐标系朝向，会应用完整外参旋转到输出
     # base: odometry orientation 已经是 base_link 朝向，只用平移外参修正位置
     odom_orientation_frame: 'planar'

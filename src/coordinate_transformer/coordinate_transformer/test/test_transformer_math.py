@@ -87,3 +87,27 @@ def test_calibrate_x_base_orientation_mode_ignores_yaw_for_output_frame():
     )
     assert np.isclose(result['x'], sensor_offset[0], atol=1e-9)
     assert result['corrected_position_rmse'] < 1e-9
+
+
+def test_planar_mode_uses_yaw_offset_only_for_translation():
+    sensor_offset = [-0.4, 0.0, 0.0, 0.0, 0.0, np.pi]
+    transformer = OffsetTransformer(
+        sensor_offset,
+        odom_orientation_frame='planar',
+    )
+    pose_transformer = PoseTransformer()
+
+    input_yaw = 0.7
+    yaw_for_translation = input_yaw - sensor_offset[5]
+    t_map_sensor = make_pose_matrix(1.2, -0.7, input_yaw)
+    t_map_sensor[:3, 3] = np.array([1.2, -0.7, 0.0]) + (
+        R.from_euler('ZYX', [yaw_for_translation, 0.0, 0.0]).as_matrix()
+        @ np.array(sensor_offset[:3])
+    )
+    odom_pose = pose_transformer.matrix_to_pose(t_map_sensor)
+    output_pose = transformer.odom_to_map_with_offset(odom_pose, np.eye(4))
+
+    output_yaw = R.from_quat(output_pose[3:7]).as_euler('ZYX')[0]
+    yaw_error = (output_yaw - input_yaw + np.pi) % (2.0 * np.pi) - np.pi
+    assert np.isclose(yaw_error, 0.0, atol=1e-9)
+    assert np.allclose(output_pose[:3], [1.2, -0.7, 0.0], atol=1e-9)

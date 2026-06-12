@@ -134,22 +134,25 @@ class OffsetTransformer:
         """
         平面机器人专用补偿。
 
-        sensor_offset 的 y 视为 0。yaw_offset 只描述传感器坐标系和 base_link
-        坐标系的夹角，位置补偿使用修正后的 base yaw。
+        sensor_offset 的 y 视为 0。yaw_offset 只用于计算传感器杆臂方向，
+        不改变最终输出的机器人 yaw。
         """
         x_offset = float(self.sensor_offset[0])
         z_offset = float(self.sensor_offset[2])
         yaw_offset = float(self.sensor_offset[5])
 
         yaw_sensor = R.from_matrix(T_map_sensor[:3, :3]).as_euler('ZYX')[0]
-        yaw_base = yaw_sensor - yaw_offset
-        R_map_base = R.from_euler('ZYX', [yaw_base, 0.0, 0.0]).as_matrix()
+        yaw_for_translation = yaw_sensor - yaw_offset
+        R_map_translation = R.from_euler(
+            'ZYX',
+            [yaw_for_translation, 0.0, 0.0]
+        ).as_matrix()
 
         T_map_base = np.eye(4)
-        T_map_base[:3, :3] = R_map_base
+        T_map_base[:3, :3] = T_map_sensor[:3, :3]
         T_map_base[:3, 3] = (
             T_map_sensor[:3, 3]
-            - R_map_base @ np.array([x_offset, 0.0, z_offset])
+            - R_map_translation @ np.array([x_offset, 0.0, z_offset])
         )
         return T_map_base
 
