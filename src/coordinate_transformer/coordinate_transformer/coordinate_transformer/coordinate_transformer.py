@@ -64,6 +64,7 @@ class CoordinateTransformer(Node):
         self.latest_map_pose = None
         self.latest_stamp = None
         self.latest_tf_matrix = None
+        self.has_tf_cache = False
 
         # 初始化变换器
         self.transformer = OffsetTransformer(sensor_offset, map_origin_offset)
@@ -119,6 +120,7 @@ class CoordinateTransformer(Node):
                 timeout=Duration(seconds=self.tf_timeout)
             )
             self.latest_tf_matrix = self._transform_to_matrix(transform)
+            self.has_tf_cache = True
         except LookupException as e:
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5)
         except ExtrapolationException as e:
@@ -135,7 +137,7 @@ class CoordinateTransformer(Node):
                 throttle_duration_sec=5
             )
 
-        if self.latest_tf_matrix is None:
+        if not self.has_tf_cache:
             self.get_logger().warn(
                 'Waiting for target<-source TF before publishing transformed pose',
                 throttle_duration_sec=5
