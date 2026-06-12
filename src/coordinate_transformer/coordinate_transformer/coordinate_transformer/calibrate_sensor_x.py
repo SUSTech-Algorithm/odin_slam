@@ -159,10 +159,10 @@ def build_map_sensor_samples(odom_samples, tf_samples, max_tf_gap):
     return np.stack(map_sensor)
 
 
-def calibrate_x(t_map_sensor_samples, sensor_offset, odom_orientation_frame='sensor'):
+def calibrate_x(t_map_sensor_samples, sensor_offset, odom_orientation_frame='planar'):
     """Estimate sensor_offset.x by minimizing robot-center position variance."""
-    if odom_orientation_frame not in ('sensor', 'base'):
-        raise ValueError('odom_orientation_frame must be "sensor" or "base"')
+    if odom_orientation_frame not in ('planar', 'sensor', 'base'):
+        raise ValueError('odom_orientation_frame must be "planar", "sensor", or "base"')
 
     sensor_offset = np.array(sensor_offset, dtype=float)
     fixed_offset = sensor_offset.copy()
@@ -171,7 +171,7 @@ def calibrate_x(t_map_sensor_samples, sensor_offset, odom_orientation_frame='sen
     t_base_sensor_fixed = OffsetTransformer._build_transform(fixed_offset)
     fixed_translation = t_base_sensor_fixed[:3, 3]
     x_axis = np.array([1.0, 0.0, 0.0])
-    if odom_orientation_frame == 'sensor':
+    if odom_orientation_frame in ('planar', 'sensor'):
         r_sensor_base = t_base_sensor_fixed[:3, :3].T
         fixed_rotation = r_sensor_base
     else:
@@ -248,7 +248,11 @@ def parse_args():
     parser.add_argument('--tf-topic', default='/tf')
     parser.add_argument('--source-frame', default=None)
     parser.add_argument('--target-frame', default=None)
-    parser.add_argument('--odom-orientation-frame', choices=['sensor', 'base'], default=None)
+    parser.add_argument(
+        '--odom-orientation-frame',
+        choices=['planar', 'sensor', 'base'],
+        default=None,
+    )
     parser.add_argument('--max-tf-gap', type=float, default=0.2)
     return parser.parse_args()
 
@@ -261,7 +265,7 @@ def main():
     args.target_frame = args.target_frame or params.get('target_frame', 'map')
     odom_orientation_frame = (
         args.odom_orientation_frame
-        or params.get('odom_orientation_frame', 'sensor')
+        or params.get('odom_orientation_frame', 'planar')
     )
 
     sensor_offset = params.get('sensor_offset', [0.0] * 6)

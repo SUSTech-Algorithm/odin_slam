@@ -1,7 +1,7 @@
 coordinate_transformer:
   ros__parameters:
     sensor_offset:
-    - 0.394966
+    - -0.394966
     - 0.0
     - 0.0
     - 0.0
@@ -17,7 +17,7 @@ coordinate_transformer:
     source_frame: odom
     target_frame: map
     tf_timeout: 0.05
-    odom_orientation_frame: base
+    odom_orientation_frame: planar
     odin_pose_topic: /odin1/odometry_highfreq
     output_pose_topic: /odin1/relocation_1
     publish_transformed_pose: true

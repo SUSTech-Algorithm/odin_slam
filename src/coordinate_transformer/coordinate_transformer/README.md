@@ -50,7 +50,7 @@ coordinate_transformer:
     source_frame: 'odom'
     target_frame: 'map'
     tf_timeout: 1.0
-    odom_orientation_frame: 'base'
+    odom_orientation_frame: 'planar'
 
     # 发布选项
     publish_transformed_pose: True
@@ -72,7 +72,7 @@ coordinate_transformer:
 | `source_frame` | string | 'odom' | 源坐标系 |
 | `target_frame` | string | 'map' | 目标坐标系 |
 | `tf_timeout` | float | 1.0 | TF 查询超时时间 (秒) |
-| `odom_orientation_frame` | string | 'base' | `base` 表示 odometry orientation 已是 base_link 朝向，只修正传感器原点平移；`sensor` 表示 odometry pose 是传感器坐标系位姿，会应用完整 yaw 外参 |
+| `odom_orientation_frame` | string | 'planar' | `planar` 表示平面机器人模型，y 固定为 0，位置和 yaw 用显式公式补偿；`sensor` 表示 odometry pose 是传感器坐标系位姿，会应用完整 yaw 外参；`base` 表示 odometry orientation 已是 base_link 朝向，只修正传感器原点平移 |
 
 ## 使用
 
@@ -137,7 +137,7 @@ T_output     = T_map_offset @ T_map_robot
 
 Odometry 的 `child_frame_id` 不参与坐标计算；节点只使用 `pose.pose` 作为传感器在 `source_frame` 下的位姿。
 
-如果 Odin 输出的 orientation 已经是机器人/base_link 朝向，使用 `odom_orientation_frame: 'base'`，这样 yaw 外参不会再次叠加到输出姿态；如果 Odin 输出的是物理传感器坐标系朝向，使用 `odom_orientation_frame: 'sensor'`。
+当前默认使用 `odom_orientation_frame: 'planar'`。该模式假设机器人在平面运动、传感器横向偏移 `y=0`，用 `sensor_offset.x` 修正旋转半径，用 `sensor_offset.yaw` 修正输出 yaw。
 
 ## 标定方法
 

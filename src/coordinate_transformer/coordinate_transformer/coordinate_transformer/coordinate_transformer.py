@@ -39,7 +39,7 @@ class CoordinateTransformer(Node):
                 ('source_frame', 'odom'),
                 ('target_frame', 'map'),
                 ('tf_timeout', 1.0),
-                ('odom_orientation_frame', 'base'),
+                ('odom_orientation_frame', 'planar'),
                 ('odin_pose_topic', '/odin_odom'),
                 ('output_pose_topic', '/transformed/pose'),
                 ('publish_transformed_pose', True),

@@ -47,6 +47,7 @@ class OffsetTransformer:
 
     sensor_offset 表示 Odin 传感器坐标系在机器人中心/base_link 坐标系下的位姿，
     即 T_base_sensor。odom_orientation_frame 控制 odometry orientation 的语义:
+    - planar: 平面机器人模型，y 固定为 0，位置和 yaw 用显式公式补偿。
     - sensor: odometry pose 是传感器坐标系位姿，输出姿态会应用完整外参旋转。
     - base: odometry orientation 已经是 base_link 朝向，只修正传感器原点平移。
     """
@@ -55,11 +56,11 @@ class OffsetTransformer:
         self,
         sensor_offset,
         map_origin_offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-        odom_orientation_frame='sensor',
+        odom_orientation_frame='planar',
     ):
         self.pose_transformer = PoseTransformer()
-        if odom_orientation_frame not in ('sensor', 'base'):
-            raise ValueError('odom_orientation_frame must be "sensor" or "base"')
+        if odom_orientation_frame not in ('planar', 'sensor', 'base'):
+            raise ValueError('odom_orientation_frame must be "planar", "sensor", or "base"')
 
         # T_base_sensor: 传感器坐标系在机器人中心/base_link 坐标系下的位姿。
         self.T_base_sensor = self._build_transform(sensor_offset)
@@ -110,7 +111,9 @@ class OffsetTransformer:
         # T_map_sensor = T_map_odom @ T_odom_sensor
         T_map_sensor = tf_odom_to_map @ T_odom_sensor
 
-        if self.odom_orientation_frame == 'base':
+        if self.odom_orientation_frame == 'planar':
+            T_map_base = self._planar_sensor_to_base(T_map_sensor)
+        elif self.odom_orientation_frame == 'base':
             T_map_base = T_map_sensor.copy()
             T_map_base[:3, 3] = (
                 T_map_sensor[:3, 3]
@@ -126,6 +129,29 @@ class OffsetTransformer:
         x, y, z, qx, qy, qz, qw = self.pose_transformer.matrix_to_pose(T_final)
 
         return x, y, z, qx, qy, qz, qw
+
+    def _planar_sensor_to_base(self, T_map_sensor):
+        """
+        平面机器人专用补偿。
+
+        sensor_offset 的 y 视为 0。yaw_offset 只描述传感器坐标系和 base_link
+        坐标系的夹角，位置补偿使用修正后的 base yaw。
+        """
+        x_offset = float(self.sensor_offset[0])
+        z_offset = float(self.sensor_offset[2])
+        yaw_offset = float(self.sensor_offset[5])
+
+        yaw_sensor = R.from_matrix(T_map_sensor[:3, :3]).as_euler('ZYX')[0]
+        yaw_base = yaw_sensor - yaw_offset
+        R_map_base = R.from_euler('ZYX', [yaw_base, 0.0, 0.0]).as_matrix()
+
+        T_map_base = np.eye(4)
+        T_map_base[:3, :3] = R_map_base
+        T_map_base[:3, 3] = (
+            T_map_sensor[:3, 3]
+            - R_map_base @ np.array([x_offset, 0.0, z_offset])
+        )
+        return T_map_base
 
     def transform_point(self, point, tf_matrix):
         p_homogeneous = np.array([point[0], point[1], point[2], 1.0])
