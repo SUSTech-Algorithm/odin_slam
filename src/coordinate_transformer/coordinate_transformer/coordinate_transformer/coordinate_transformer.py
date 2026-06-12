@@ -122,11 +122,21 @@ class CoordinateTransformer(Node):
             self.latest_tf_matrix = self._transform_to_matrix(transform)
             self.has_tf_cache = True
         except LookupException as e:
+            self._invalidate_tf_cache()
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5)
         except ExtrapolationException as e:
+            self._invalidate_tf_cache()
             self.get_logger().warn(f'TF extrapolation failed: {e}', throttle_duration_sec=5)
         except ConnectivityException as e:
+            self._invalidate_tf_cache()
             self.get_logger().warn(f'TF connectivity failed: {e}', throttle_duration_sec=5)
+
+    def _invalidate_tf_cache(self):
+        """Clear cached transform and output when the configured TF is unavailable."""
+        self.latest_tf_matrix = None
+        self.has_tf_cache = False
+        self.latest_map_pose = None
+        self.latest_stamp = None
 
     def odin_pose_callback(self, msg: Odometry):
         """处理 odin 位姿，计算并缓存 map 坐标系下的结果"""
@@ -163,7 +173,11 @@ class CoordinateTransformer(Node):
 
     def publish_timer_callback(self):
         """定时器回调，按固定频率发布缓存的位姿"""
-        if self.latest_map_pose is None or self.pose_pub is None:
+        if (
+            not self.has_tf_cache
+            or self.latest_map_pose is None
+            or self.pose_pub is None
+        ):
             return
 
         transformed_pose = PoseStamped()
