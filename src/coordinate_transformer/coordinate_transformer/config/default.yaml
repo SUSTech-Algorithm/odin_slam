@@ -13,16 +13,17 @@ coordinate_transformer:
     # (x, y, z) 单位: 米
     # (roll, pitch, yaw) 单位: 弧度
     # x > 0 表示 odin (传感器) 在机器人中心/base_link 前方
+    # y > 0 表示 odin (传感器) 在机器人中心/base_link 左侧
     # yaw = pi 表示传感器物理坐标系与机器人坐标系相差 180 度
-    sensor_offset: [-0.394966, 0.0, 0.0, 0.0, 0.0, 3.141592653589]
+    sensor_offset: [-0.395299, 0.019101, 0.0, 0.0, 0.0, 3.141592653589]
 
     # ============================================
     # map 坐标系原点偏移
     # ============================================
-    # 用于扣除标定自转时估计出的机器人中心圆心偏置
+    # 坐标原点偏移与传感器外参标定分开处理；默认不扣除自转圆心
     # (x, y, z) 单位: 米
     # (roll, pitch, yaw) 单位: 弧度
-    map_origin_offset: [0.401428, -0.014813, -0.003184, 0.0, 0.0, 0.0]
+    map_origin_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
     # ============================================
     # TF 配置
@@ -36,7 +37,7 @@ coordinate_transformer:
     # 等待 TF 变换的超时时间 (秒)
     tf_timeout: 0.05
 
-    # planar: 平面机器人模型，y 固定为 0；yaw 只影响平移补偿方向，不改输出角度
+    # planar: 平面机器人模型；yaw 只影响平移补偿方向，不改输出角度
     # sensor: odometry orientation 是传感器坐标系朝向，会应用完整外参旋转到输出
     # base: odometry orientation 已经是 base_link 朝向，只用平移外参修正位置
     odom_orientation_frame: 'planar'

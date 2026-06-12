@@ -30,7 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'coordinate_transformer = coordinate_transformer.coordinate_transformer:main',
-            'calibrate_sensor_x = coordinate_transformer.calibrate_sensor_x:main',
+            'calibrate_sensor_offset = coordinate_transformer.calibrate_sensor_x:main',
         ],
     },
 )
