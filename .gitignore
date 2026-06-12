@@ -6,3 +6,6 @@ log
 ros.zip
 ros/
 rosbag2*
+rosbag*
+.codex
+.agents

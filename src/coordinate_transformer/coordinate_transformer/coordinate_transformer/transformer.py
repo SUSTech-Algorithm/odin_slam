@@ -45,16 +45,22 @@ class OffsetTransformer:
     坐标系约定: FLU (front-X, left-Y, up-Z)
     欧拉角顺序: ZYX (yaw-pitch-roll)
 
-    sensor_offset 表示 T_base_sensor:
-    传感器坐标系相对机器人中心/底盘坐标系的位姿。x > 0 表示传感器在机器人中心前方。
+    sensor_offset 表示 Odin 传感器坐标系在机器人中心/base_link 坐标系下的位姿，
+    即 T_base_sensor。输出位姿为机器人中心/base_link 在 map 坐标系下的位姿。
     """
 
     def __init__(self, sensor_offset, map_origin_offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)):
         self.pose_transformer = PoseTransformer()
 
-        # T_base_sensor: 传感器相对机器人中心/底盘坐标系的位姿。
+        # T_base_sensor: 传感器坐标系在机器人中心/base_link 坐标系下的位姿。
         self.T_base_sensor = self._build_transform(sensor_offset)
         self.T_sensor_base = self._inverse_transform(self.T_base_sensor)
+
+        # 兼容旧字段名，避免外部调试脚本直接访问属性时报错。
+        self.T_robot_sensor = self.T_base_sensor
+        self.T_sensor_robot = self.T_sensor_base
+        self.T_sensor_to_robot = self.T_base_sensor
+        self.T_robot_to_sensor = self.T_sensor_base
 
         self.sensor_offset = sensor_offset
         self.map_origin_offset = map_origin_offset
@@ -82,10 +88,11 @@ class OffsetTransformer:
 
     def odom_to_map_with_offset(self, odom_pose, tf_odom_to_map):
         """
-        将 SLAM 套件/传感器在 odom 下的位姿转换为机器人中心在 map 下的位姿。
+        将 Odin 传感器位姿转换为 map 坐标系下的机器人中心/base_link 位姿。
 
-        参数 tf_odom_to_map 保持历史命名兼容，实际应传入 T_map_odom
-        (即 TF2 lookup_transform(target_frame, source_frame) 的结果)。
+        变换链:
+            T_map_sensor = T_map_odom @ T_odom_sensor
+            T_map_base = T_map_sensor @ T_sensor_base
         """
         T_odom_sensor = self.pose_transformer.pose_to_matrix(*odom_pose)
 

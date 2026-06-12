@@ -1,11 +1,11 @@
 # coordinate_transformer
 
-ROS2 坐标系转换包，用于 odin SLAM 系统。处理 odom 到 map 的坐标变换、传感器偏移补偿以及 map 原点偏移调整。
+ROS2 坐标系转换包，用于 odin SLAM 系统。将 Odin 传感器位姿转换为 map 坐标系下的机器人中心/base_link 位姿，并支持 map 原点偏移调整。
 
 ## 功能
 
-- **odom → map 坐标变换**: 订阅 odom 坐标系下的位姿，转换到 map 坐标系
-- **传感器偏移补偿**: 输出机器人中心位姿，处理 odin 传感器不在机器人中心的问题
+- **odom → map 坐标变换**: 订阅 odom 坐标系下的 Odin 传感器位姿，转换到 map 坐标系
+- **传感器偏移补偿**: 根据安装外参，将 Odin 传感器 pose 换算成机器人中心/base_link pose
 - **map 原点偏移**: 支持移动 map 坐标系原点到任意位置
 - **点云转换**: 支持点云数据的坐标系转换
 
@@ -39,7 +39,7 @@ coordinate_transformer:
     odin_pose_topic: '/odin_odom'
     output_pose_topic: '/transformed/pose'
 
-    # 传感器相对机器人中心/底盘坐标系的外参 [x, y, z, roll, pitch, yaw]
+    # 传感器在机器人中心/base_link 坐标系下的位姿 [x, y, z, roll, pitch, yaw]
     # 单位: 米 / 弧度
     sensor_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
@@ -66,7 +66,7 @@ coordinate_transformer:
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `sensor_offset` | list[6] | [0,0,0,0,0,0] | 传感器相对机器人中心的外参 T_base_sensor；x>0 表示传感器在机器人中心前方 |
+| `sensor_offset` | list[6] | [0,0,0,0,0,0] | Odin 传感器坐标系在机器人中心/base_link 坐标系下的位姿，即 `T_base_sensor`；x>0 表示传感器在机器人中心前方 |
 | `map_origin_offset` | list[6] | [0,0,0,0,0,0] | map 原点偏移量 |
 | `source_frame` | string | 'odom' | 源坐标系 |
 | `target_frame` | string | 'map' | 目标坐标系 |
@@ -98,31 +98,42 @@ ros2 run coordinate_transformer coordinate_transformer --ros-args \
 
 | 话题 | 类型 | 说明 |
 |------|------|------|
-| `/ Odin_odom` | nav_msgs/Odometry | odin 传感器在 odom 下的位姿 |
+| `/odin_odom` | nav_msgs/Odometry | Odin 传感器在 odom 下的位姿 |
 | `/points` | sensor_msgs/PointCloud2 | 待转换的点云 |
 
 ## 发布话题
 
 | 话题 | 类型 | 说明 |
 |------|------|------|
-| `/transformed/pose` | geometry_msgs/PoseStamped | 转换到 map 坐标系的位姿 |
+| `/transformed/pose` | geometry_msgs/PoseStamped | map 坐标系下的机器人中心/base_link 位姿 |
 | `/transformed/points` | sensor_msgs/PointCloud2 | 转换到 map 坐标系的点云 |
 
 ## 坐标变换原理
 
-完整变换链:
+目标输出是 `T_map_robot`：机器人中心/base_link 坐标系在 map 坐标系下的位姿。
+
+约定:
+
+- `T_map_odom`: TF 中 `odom -> map` 的变换，即 map 坐标系下的 odom 位姿
+- `T_odom_sensor`: Odin SLAM 输出的传感器位姿
+- `T_robot_sensor`: `sensor_offset`，传感器坐标系在机器人中心/base_link 坐标系下的位姿
+- `T_sensor_robot`: `T_robot_sensor` 的逆，用于从传感器位姿换算到机器人中心/base_link 位姿
+
+完整 pose 变换链:
 
 ```
 T_map_sensor = T_map_odom @ T_odom_sensor
-T_map_base = T_map_sensor @ inverse(T_base_sensor)
-T_output = T_map_offset @ T_map_base
+T_map_robot  = T_map_sensor @ T_sensor_robot
+T_output     = T_map_offset @ T_map_robot
 ```
 
-即: 先将 SLAM 套件/传感器位姿从 odom 转到 map，再用传感器外参补偿到机器人中心。
+即: 先把 Odin 传感器 pose 表达到 map 中，再根据安装外参换算成机器人中心/base_link pose。这里不会对整个 map 坐标系做共轭变换。
 
 ### 传感器偏移
 
-如果 odin 传感器不在机器人中心，需要测量并配置 `sensor_offset`。这个偏移描述传感器坐标系相对机器人中心/底盘坐标系的位姿，`x > 0` 表示传感器在机器人中心前方。Odometry 的 `child_frame_id` 不参与坐标计算；节点只使用 `pose.pose` 作为传感器在 `source_frame` 下的位姿。
+如果 Odin 传感器不在机器人中心，需要测量并配置 `sensor_offset`。这个偏移描述的是传感器坐标系在机器人中心/base_link 坐标系下的位姿。机器人原地自转时，原始 Odin 传感器位置可能绕机器人中心画圆；转换后的机器人中心位置应基本保持不动，主要只有 yaw 变化。
+
+Odometry 的 `child_frame_id` 不参与坐标计算；节点只使用 `pose.pose` 作为传感器在 `source_frame` 下的位姿。
 
 ## 标定方法
 
@@ -132,6 +143,8 @@ T_output = T_map_offset @ T_map_base
 2. 运行 `ros2 run coordinate_transformer calibrate_sensor_x <bag_dir>`
 3. 标定工具会只估计 `sensor_offset.x`，其它外参沿用当前参数文件
 4. 默认生成 `config/calibrated.yaml`，不会覆盖 `default.yaml`
+
+当前 `default.yaml` 中的 `sensor_offset` 是根据一段原地自转 rosbag 初步拟合出的值，用于减少旋转时的半径残差。它不应替代实际机械测量；如果传感器安装位置变化，需要重新标定。
 
 ### map 原点标定
 
