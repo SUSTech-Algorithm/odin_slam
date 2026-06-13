@@ -9,6 +9,7 @@ import rosbag2_py
 import yaml
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
+from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation as R
 
 
@@ -150,6 +151,110 @@ def calibrate_x(odom_samples, sensor_offset, odom_orientation_frame='planar'):
     }
 
 
+def fit_circle_and_ellipse(odom_samples):
+    """Fit circle/ellipse diagnostics to odometry xy trajectory."""
+    positions = odom_samples[:, :2, 3]
+    if len(positions) < 5:
+        raise ValueError('At least 5 odometry samples are required for ellipse fitting')
+
+    center0 = positions.mean(axis=0)
+    radius0 = np.linalg.norm(positions - center0, axis=1).mean()
+
+    def circle_residual(values):
+        center_x, center_y, radius = values
+        radii = np.linalg.norm(positions - [center_x, center_y], axis=1)
+        return radii - radius
+
+    circle_solution = least_squares(
+        circle_residual,
+        [center0[0], center0[1], radius0],
+    )
+    circle_x, circle_y, circle_radius = circle_solution.x
+    circle_residuals = circle_residual(circle_solution.x)
+    circle_rmse = float(np.sqrt(np.mean(circle_residuals * circle_residuals)))
+
+    centered = positions - center0
+    covariance = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    theta0 = float(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+    semi_major0, semi_minor0 = np.sqrt(np.maximum(eigenvalues * 2.0, 1e-12))
+    if semi_major0 < semi_minor0:
+        semi_major0, semi_minor0 = semi_minor0, semi_major0
+        theta0 += np.pi / 2.0
+
+    def ellipse_residual(values):
+        center_x, center_y, log_a, log_b, theta = values
+        semi_major = np.exp(log_a)
+        semi_minor = np.exp(log_b)
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        x = positions[:, 0] - center_x
+        y = positions[:, 1] - center_y
+        x_rot = cos_theta * x + sin_theta * y
+        y_rot = -sin_theta * x + cos_theta * y
+        return (x_rot / semi_major) ** 2 + (y_rot / semi_minor) ** 2 - 1.0
+
+    ellipse_solution = least_squares(
+        ellipse_residual,
+        [
+            center0[0],
+            center0[1],
+            np.log(semi_major0),
+            np.log(semi_minor0),
+            theta0,
+        ],
+        max_nfev=20000,
+    )
+    ellipse_x, ellipse_y, log_a, log_b, theta = ellipse_solution.x
+    semi_major = float(np.exp(log_a))
+    semi_minor = float(np.exp(log_b))
+    if semi_minor > semi_major:
+        semi_major, semi_minor = semi_minor, semi_major
+        theta += np.pi / 2.0
+
+    eccentricity = float(
+        np.sqrt(max(0.0, 1.0 - (semi_minor * semi_minor) / (semi_major * semi_major)))
+    )
+    axis_ratio = float(semi_minor / semi_major)
+
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    x = positions[:, 0] - ellipse_x
+    y = positions[:, 1] - ellipse_y
+    x_rot = cos_theta * x + sin_theta * y
+    y_rot = -sin_theta * x + cos_theta * y
+    angle = np.arctan2(y_rot, x_rot)
+    ellipse_radius = 1.0 / np.sqrt(
+        (np.cos(angle) / semi_major) ** 2
+        + (np.sin(angle) / semi_minor) ** 2
+    )
+    point_radius = np.sqrt(x_rot * x_rot + y_rot * y_rot)
+    ellipse_radial_residuals = point_radius - ellipse_radius
+    ellipse_radial_rmse = float(
+        np.sqrt(np.mean(ellipse_radial_residuals * ellipse_radial_residuals))
+    )
+
+    return {
+        'circle_center_x': float(circle_x),
+        'circle_center_y': float(circle_y),
+        'circle_radius': float(circle_radius),
+        'circle_radial_rmse': circle_rmse,
+        'circle_relative_rmse': float(circle_rmse / abs(circle_radius)),
+        'ellipse_center_x': float(ellipse_x),
+        'ellipse_center_y': float(ellipse_y),
+        'ellipse_semi_major': semi_major,
+        'ellipse_semi_minor': semi_minor,
+        'ellipse_axis_ratio': axis_ratio,
+        'ellipse_eccentricity': eccentricity,
+        'ellipse_major_axis_rad': float(theta),
+        'ellipse_major_axis_deg': float(np.degrees(theta)),
+        'ellipse_radial_rmse': ellipse_radial_rmse,
+    }
+
+
 def write_calibrated_yaml(data, params, result, output_path, write_map_origin):
     """Write a complete calibrated ROS 2 params file."""
     sensor_offset = list(params.get('sensor_offset', [0.0] * 6))
@@ -224,6 +329,7 @@ def main():
         sensor_offset,
         odom_orientation_frame=odom_orientation_frame,
     )
+    shape = fit_circle_and_ellipse(odom_samples)
     write_calibrated_yaml(
         data,
         params,
@@ -259,6 +365,34 @@ def main():
     )
     print(f'Raw position RMSE: {result["raw_position_rmse"]:.6f} m')
     print(f'Corrected center RMSE: {result["corrected_center_rmse"]:.6f} m')
+    print('Trajectory shape diagnostics:')
+    print(
+        '  Circle center/radius: '
+        f'({shape["circle_center_x"]:.6f}, {shape["circle_center_y"]:.6f}), '
+        f'r={shape["circle_radius"]:.6f} m'
+    )
+    print(
+        '  Circle radial RMSE: '
+        f'{shape["circle_radial_rmse"]:.6f} m '
+        f'({shape["circle_relative_rmse"]:.3%} of radius)'
+    )
+    print(
+        '  Ellipse center: '
+        f'({shape["ellipse_center_x"]:.6f}, {shape["ellipse_center_y"]:.6f})'
+    )
+    print(
+        '  Ellipse semi axes: '
+        f'a={shape["ellipse_semi_major"]:.6f} m, '
+        f'b={shape["ellipse_semi_minor"]:.6f} m, '
+        f'b/a={shape["ellipse_axis_ratio"]:.6f}'
+    )
+    print(f'  Ellipse eccentricity: {shape["ellipse_eccentricity"]:.6f}')
+    print(
+        '  Ellipse major axis angle: '
+        f'{shape["ellipse_major_axis_rad"]:.6f} rad '
+        f'({shape["ellipse_major_axis_deg"]:.1f} deg)'
+    )
+    print(f'  Ellipse radial RMSE: {shape["ellipse_radial_rmse"]:.6f} m')
     print(f'Wrote calibrated params: {args.output}')
 
 
