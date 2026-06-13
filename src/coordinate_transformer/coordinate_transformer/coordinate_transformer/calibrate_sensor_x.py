@@ -2,6 +2,7 @@
 """Calibrate planar sensor_offset x/y from an offline ROS 2 bag."""
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -255,6 +256,128 @@ def fit_circle_and_ellipse(odom_samples):
     }
 
 
+def corrected_centers(odom_samples, result, sensor_offset, odom_orientation_frame):
+    """Return compensated center xy samples using the calibrated offset."""
+    yaw_offset = float(sensor_offset[5])
+    offset_xy = np.array([result['x'], result['y']])
+    positions = odom_samples[:, :2, 3]
+    yaws = np.array([
+        R.from_matrix(sample[:3, :3]).as_euler('ZYX')[0]
+        for sample in odom_samples
+    ])
+    centers = []
+    for position, yaw in zip(positions, yaws):
+        rotation = rotation_for_offset(yaw, yaw_offset, odom_orientation_frame)
+        centers.append(position - rotation @ offset_xy)
+    return np.array(centers), np.unwrap(yaws)
+
+
+def save_diagnostic_plot(output_path, odom_samples, result, shape, sensor_offset,
+                         odom_orientation_frame):
+    """Save a PNG with trajectory, fit, residual, and yaw diagnostics."""
+    try:
+        os.environ.setdefault('MPLCONFIGDIR', str(Path.cwd() / '.matplotlib_cache'))
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError(
+            'matplotlib is required for --plot. Install python3-matplotlib.'
+        ) from exc
+
+    positions = odom_samples[:, :2, 3]
+    centers, yaws = corrected_centers(
+        odom_samples,
+        result,
+        sensor_offset,
+        odom_orientation_frame,
+    )
+
+    angle = np.linspace(0.0, 2.0 * np.pi, 360)
+    circle_x = (
+        shape['circle_center_x']
+        + shape['circle_radius'] * np.cos(angle)
+    )
+    circle_y = (
+        shape['circle_center_y']
+        + shape['circle_radius'] * np.sin(angle)
+    )
+
+    ellipse_angle = angle
+    ellipse_local_x = shape['ellipse_semi_major'] * np.cos(ellipse_angle)
+    ellipse_local_y = shape['ellipse_semi_minor'] * np.sin(ellipse_angle)
+    theta = shape['ellipse_major_axis_rad']
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    ellipse_x = (
+        shape['ellipse_center_x']
+        + cos_theta * ellipse_local_x
+        - sin_theta * ellipse_local_y
+    )
+    ellipse_y = (
+        shape['ellipse_center_y']
+        + sin_theta * ellipse_local_x
+        + cos_theta * ellipse_local_y
+    )
+
+    radii = np.linalg.norm(
+        positions - [shape['circle_center_x'], shape['circle_center_y']],
+        axis=1,
+    )
+    circle_residuals = radii - shape['circle_radius']
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
+    ax = axes[0, 0]
+    ax.plot(positions[:, 0], positions[:, 1], '.', markersize=1.5, label='odom xy')
+    ax.plot(circle_x, circle_y, '-', linewidth=1.2, label='circle fit')
+    ax.plot(ellipse_x, ellipse_y, '-', linewidth=1.2, label='ellipse fit')
+    ax.plot(result['center_x'], result['center_y'], 'x', markersize=8, label='calibrated center')
+    ax.set_title('Raw odometry trajectory')
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.axis('equal')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best')
+
+    ax = axes[0, 1]
+    ax.plot(centers[:, 0], centers[:, 1], '.', markersize=1.5)
+    ax.plot(centers[:, 0].mean(), centers[:, 1].mean(), 'x', markersize=8)
+    ax.set_title(
+        f'Corrected center trajectory, RMSE={result["corrected_center_rmse"]:.4f} m'
+    )
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.axis('equal')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    ax.plot(circle_residuals, linewidth=0.8)
+    ax.axhline(0.0, color='black', linewidth=0.8)
+    ax.set_title(
+        f'Circle radial residual, RMSE={shape["circle_radial_rmse"]:.4f} m'
+    )
+    ax.set_xlabel('sample')
+    ax.set_ylabel('residual [m]')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+    ax.plot(np.degrees(yaws), linewidth=0.8)
+    ax.set_title(f'Yaw span={result["yaw_span_deg"]:.1f} deg')
+    ax.set_xlabel('sample')
+    ax.set_ylabel('yaw [deg]')
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle(
+        'sensor_offset '
+        f'x={result["x"]:.6f} m, y={result["y"]:.6f} m; '
+        f'ellipse e={shape["ellipse_eccentricity"]:.6f}, '
+        f'b/a={shape["ellipse_axis_ratio"]:.6f}'
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
 def write_calibrated_yaml(data, params, result, output_path, write_map_origin):
     """Write a complete calibrated ROS 2 params file."""
     sensor_offset = list(params.get('sensor_offset', [0.0] * 6))
@@ -282,7 +405,7 @@ def parse_args():
     """Parse command-line arguments."""
     package_root = default_package_root()
     default_params = package_root / 'config' / 'default.yaml'
-    default_output = package_root / 'config' / 'calibrated.yaml'
+    default_output = package_root / 'output' / 'calibrated.yaml'
 
     parser = argparse.ArgumentParser(
         description='Calibrate planar sensor_offset x/y from self-rotation odometry.'
@@ -301,6 +424,17 @@ def parse_args():
         '--write-map-origin',
         action='store_true',
         help='Also write -rotation_center into map_origin_offset x/y.',
+    )
+    parser.add_argument(
+        '--plot',
+        action='store_true',
+        help='Write a calibration diagnostic PNG next to the output YAML.',
+    )
+    parser.add_argument(
+        '--plot-output',
+        type=Path,
+        default=None,
+        help='Path for the diagnostic PNG. Implies --plot.',
     )
     return parser.parse_args()
 
@@ -393,6 +527,17 @@ def main():
         f'({shape["ellipse_major_axis_deg"]:.1f} deg)'
     )
     print(f'  Ellipse radial RMSE: {shape["ellipse_radial_rmse"]:.6f} m')
+    if args.plot or args.plot_output is not None:
+        plot_output = args.plot_output or args.output.with_suffix('.png')
+        save_diagnostic_plot(
+            plot_output,
+            odom_samples,
+            result,
+            shape,
+            sensor_offset,
+            odom_orientation_frame,
+        )
+        print(f'Wrote diagnostic plot: {plot_output}')
     print(f'Wrote calibrated params: {args.output}')
 
 

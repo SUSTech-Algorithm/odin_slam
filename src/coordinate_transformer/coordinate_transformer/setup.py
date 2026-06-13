@@ -16,7 +16,7 @@ setup(
             'launch/odin_transformer.launch.py',
         ]),
     ],
-    install_requires=['setuptools', 'numpy', 'PyYAML', 'scipy'],
+    install_requires=['setuptools', 'numpy', 'PyYAML', 'scipy', 'matplotlib'],
     zip_safe=True,
     maintainer='fjienan',
     maintainer_email='fjienan@163.com',

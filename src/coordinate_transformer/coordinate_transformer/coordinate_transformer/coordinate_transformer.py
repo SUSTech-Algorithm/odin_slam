@@ -147,20 +147,21 @@ class CoordinateTransformer(Node):
         return x, y, z, qx, qy, qz, qw
 
     def _transform_from_odom_to_map(self, map_pose_position: list, map_pose_yaw: float):
-        radius = np.sqrt(self.sensor_offset[0]**2 + self.sensor_offset[1]**2)
-        if radius < 1e-9:
-            return [
-                map_pose_position[0] + self.map_origin_offset[0],
-                map_pose_position[1] + self.map_origin_offset[1],
-                map_pose_position[2],
-            ]
-        cos_alpha = -self.sensor_offset[0] / radius
-        sin_alpha = self.sensor_offset[1] / radius
-        position = [0.0, 0.0, 0.0]
-        position[0] = map_pose_position[0] - radius*(cos_alpha - (np.cos(map_pose_yaw)*cos_alpha-np.sin(map_pose_yaw)*sin_alpha)) + self.map_origin_offset[0]
-        position[1] = map_pose_position[1] + radius*(sin_alpha + (np.sin(map_pose_yaw)*cos_alpha-np.cos(map_pose_yaw)*sin_alpha)) + self.map_origin_offset[1]
-        position[2] = map_pose_position[2]
-        return position
+        offset_x = float(self.sensor_offset[0])
+        offset_y = float(self.sensor_offset[1])
+        yaw_offset = float(self.sensor_offset[5])
+        yaw_for_offset = map_pose_yaw - yaw_offset
+
+        cos_yaw = np.cos(yaw_for_offset)
+        sin_yaw = np.sin(yaw_for_offset)
+        dx = cos_yaw * offset_x - sin_yaw * offset_y
+        dy = sin_yaw * offset_x + cos_yaw * offset_y
+
+        return [
+            map_pose_position[0] - dx + self.map_origin_offset[0],
+            map_pose_position[1] - dy + self.map_origin_offset[1],
+            map_pose_position[2],
+        ]
 
     def odin_pose_callback(self, msg: Odometry):
         """处理 odin 位姿，计算并缓存 map 坐标系下的结果"""
@@ -189,7 +190,7 @@ class CoordinateTransformer(Node):
         map_pose_matrix = tf_matrix @ odom_pose_matrix 
         map_pose = self.matrix_to_pose(map_pose_matrix)
         map_pose_yaw = R.from_quat([map_pose[3], map_pose[4], map_pose[5], map_pose[6]]).as_euler('ZYX')[0]
-        map_pose_position = [-map_pose[0], -map_pose[1], map_pose[2]]
+        map_pose_position = [map_pose[0], map_pose[1], map_pose[2]]
         self.latest_map_position = self._transform_from_odom_to_map(map_pose_position, map_pose_yaw)
         self.latest_map_quaternion = [map_pose[3], map_pose[4], map_pose[5], map_pose[6]]
         self.latest_stamp = msg.header.stamp
