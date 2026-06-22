@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Calibrate the sensor x offset from an offline ROS 2 bag."""
+"""Calibrate planar sensor_offset x/y from an offline ROS 2 bag."""
 
 import argparse
-from bisect import bisect_left
+import os
 from pathlib import Path
 
 import numpy as np
@@ -10,14 +10,8 @@ import rosbag2_py
 import yaml
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
+from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation as R
-
-from .transformer import OffsetTransformer, PoseTransformer
-
-
-def stamp_to_ns(stamp):
-    """Convert a ROS stamp to integer nanoseconds."""
-    return stamp.sec * 1000000000 + stamp.nanosec
 
 
 def default_package_root():
@@ -25,18 +19,14 @@ def default_package_root():
     return Path(__file__).resolve().parents[1]
 
 
-def transform_to_matrix(transform):
-    """Convert a TransformStamped transform field to a 4x4 matrix."""
-    t = transform.translation
-    q = transform.rotation
-    return PoseTransformer().pose_to_matrix(t.x, t.y, t.z, q.x, q.y, q.z, q.w)
-
-
 def pose_to_matrix(pose):
     """Convert a geometry_msgs Pose to a 4x4 matrix."""
     p = pose.position
     q = pose.orientation
-    return PoseTransformer().pose_to_matrix(p.x, p.y, p.z, q.x, q.y, q.z, q.w)
+    matrix = np.eye(4)
+    matrix[:3, :3] = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+    matrix[:3, 3] = [p.x, p.y, p.z]
+    return matrix
 
 
 def read_template(params_file):
@@ -54,171 +44,357 @@ def read_template(params_file):
     return data, params
 
 
-def read_bag_samples(args):
-    """Read odometry samples and map<-source TF samples from a ROS 2 bag."""
+def read_odometry_samples(bag_dir, odom_topic, source_frame):
+    """Read odometry pose matrices from a ROS 2 bag."""
     reader = rosbag2_py.SequentialReader()
-    storage_options = rosbag2_py.StorageOptions(
-        uri=str(args.bag_dir),
-        storage_id='sqlite3',
+    reader.open(
+        rosbag2_py.StorageOptions(uri=str(bag_dir), storage_id='sqlite3'),
+        rosbag2_py.ConverterOptions('', ''),
     )
-    converter_options = rosbag2_py.ConverterOptions('', '')
-    reader.open(storage_options, converter_options)
 
     topic_types = {
         topic.name: topic.type for topic in reader.get_all_topics_and_types()
     }
-    required = [args.odom_topic, args.tf_topic]
-    missing = [topic for topic in required if topic not in topic_types]
-    if missing:
-        raise ValueError(f'Missing topic(s) in bag: {", ".join(missing)}')
+    if odom_topic not in topic_types:
+        raise ValueError(f'Missing odometry topic in bag: {odom_topic}')
 
-    odom_type = get_message(topic_types[args.odom_topic])
-    tf_type = get_message(topic_types[args.tf_topic])
-
-    odom_samples = []
-    tf_samples = []
+    odom_type = get_message(topic_types[odom_topic])
+    samples = []
     frame_warnings = 0
 
     while reader.has_next():
-        topic, data, bag_stamp = reader.read_next()
-        if topic == args.odom_topic:
-            msg = deserialize_message(data, odom_type)
-            if msg.header.frame_id and msg.header.frame_id != args.source_frame:
-                frame_warnings += 1
-            stamp = stamp_to_ns(msg.header.stamp) or bag_stamp
-            odom_samples.append((stamp, pose_to_matrix(msg.pose.pose)))
-        elif topic == args.tf_topic:
-            msg = deserialize_message(data, tf_type)
-            for transform in msg.transforms:
-                parent = transform.header.frame_id
-                child = transform.child_frame_id
-                matrix = transform_to_matrix(transform.transform)
-                if parent == args.target_frame and child == args.source_frame:
-                    tf_matrix = matrix
-                elif parent == args.source_frame and child == args.target_frame:
-                    tf_matrix = OffsetTransformer._inverse_transform(matrix)
-                else:
-                    continue
-                stamp = stamp_to_ns(transform.header.stamp) or bag_stamp
-                tf_samples.append((stamp, tf_matrix))
+        topic, data, _bag_stamp = reader.read_next()
+        if topic != odom_topic:
+            continue
+
+        msg = deserialize_message(data, odom_type)
+        if msg.header.frame_id and msg.header.frame_id != source_frame:
+            frame_warnings += 1
+        samples.append(pose_to_matrix(msg.pose.pose))
 
     if frame_warnings:
         print(
             f'Warning: {frame_warnings} odometry messages had frame_id different '
-            f'from source_frame "{args.source_frame}". child_frame_id was ignored.'
+            f'from source_frame "{source_frame}". child_frame_id was ignored.'
         )
+    if not samples:
+        raise ValueError(f'No odometry samples found on {odom_topic}')
 
-    if not odom_samples:
-        raise ValueError(f'No odometry samples found on {args.odom_topic}')
-    if not tf_samples:
-        raise ValueError(
-            f'No usable {args.source_frame}<->{args.target_frame} transforms '
-            f'found on {args.tf_topic}'
-        )
-
-    tf_samples.sort(key=lambda item: item[0])
-    return odom_samples, tf_samples
+    return np.stack(samples)
 
 
-def nearest_tf(stamp, tf_stamps, tf_matrices, max_gap_ns):
-    """Return the nearest TF matrix for a stamp, or None when too far away."""
-    index = bisect_left(tf_stamps, stamp)
-    candidates = []
-    if index < len(tf_stamps):
-        candidates.append(index)
-    if index > 0:
-        candidates.append(index - 1)
-    if not candidates:
-        return None
+def rotation_for_offset(yaw, yaw_offset, odom_orientation_frame):
+    """Return the planar rotation used to map sensor_offset xy into odom/map xy."""
+    if odom_orientation_frame in ('planar', 'sensor'):
+        yaw_for_translation = yaw - yaw_offset
+    elif odom_orientation_frame == 'base':
+        yaw_for_translation = yaw
+    else:
+        raise ValueError('odom_orientation_frame must be "planar", "sensor", or "base"')
 
-    best = min(candidates, key=lambda item: abs(tf_stamps[item] - stamp))
-    if abs(tf_stamps[best] - stamp) > max_gap_ns:
-        return None
-    return tf_matrices[best]
+    return R.from_euler('ZYX', [yaw_for_translation, 0.0, 0.0]).as_matrix()[:2, :2]
 
 
-def build_map_sensor_samples(odom_samples, tf_samples, max_tf_gap):
-    """Combine odometry and TF samples into T_map_sensor matrices."""
-    tf_stamps = [stamp for stamp, _matrix in tf_samples]
-    tf_matrices = [matrix for _stamp, matrix in tf_samples]
-    max_gap_ns = int(max_tf_gap * 1000000000)
-    map_sensor = []
-
-    for stamp, t_odom_sensor in odom_samples:
-        t_map_odom = nearest_tf(stamp, tf_stamps, tf_matrices, max_gap_ns)
-        if t_map_odom is None:
-            continue
-        map_sensor.append(t_map_odom @ t_odom_sensor)
-
-    if not map_sensor:
-        raise ValueError(
-            'No odometry samples could be matched with TF. '
-            'Try increasing --max-tf-gap.'
-        )
-
-    return np.stack(map_sensor)
-
-
-def calibrate_x(t_map_sensor_samples, sensor_offset):
-    """Estimate sensor_offset.x by minimizing robot-center position variance."""
+def calibrate_x(odom_samples, sensor_offset, odom_orientation_frame='planar'):
+    """Estimate planar sensor_offset x/y and self-rotation center."""
     sensor_offset = np.array(sensor_offset, dtype=float)
-    fixed_offset = sensor_offset.copy()
-    fixed_offset[0] = 0.0
+    if len(sensor_offset) != 6:
+        raise ValueError('sensor_offset must contain 6 values')
+    if len(odom_samples) < 3:
+        raise ValueError('At least 3 odometry samples are required')
 
-    t_base_sensor_fixed = OffsetTransformer._build_transform(fixed_offset)
-    r_sensor_base = t_base_sensor_fixed[:3, :3].T
-    fixed_translation = t_base_sensor_fixed[:3, 3]
-    x_axis = np.array([1.0, 0.0, 0.0])
+    yaw_offset = float(sensor_offset[5])
+    positions = odom_samples[:, :2, 3]
+    yaws = np.array([
+        R.from_matrix(sample[:3, :3]).as_euler('ZYX')[0]
+        for sample in odom_samples
+    ])
 
-    q_values = []
-    v_values = []
-    raw_positions = []
-    yaws = []
+    a_rows = []
+    b_rows = []
+    rotations = []
+    for position, yaw in zip(positions, yaws):
+        rotation = rotation_for_offset(yaw, yaw_offset, odom_orientation_frame)
+        rotations.append(rotation)
+        a_rows.append([1.0, 0.0, rotation[0, 0], rotation[0, 1]])
+        b_rows.append(position[0])
+        a_rows.append([0.0, 1.0, rotation[1, 0], rotation[1, 1]])
+        b_rows.append(position[1])
 
-    for t_map_sensor in t_map_sensor_samples:
-        r_map_sensor = t_map_sensor[:3, :3]
-        p_map_sensor = t_map_sensor[:3, 3]
-        q_values.append(p_map_sensor - r_map_sensor @ r_sensor_base @ fixed_translation)
-        v_values.append(r_map_sensor @ r_sensor_base @ x_axis)
-        raw_positions.append(p_map_sensor)
-        yaws.append(R.from_matrix(r_map_sensor).as_euler('ZYX')[0])
+    solution, *_unused = np.linalg.lstsq(
+        np.array(a_rows),
+        np.array(b_rows),
+        rcond=None,
+    )
+    center_xy = solution[:2]
+    offset_xy = solution[2:4]
 
-    q_values = np.array(q_values)
-    v_values = np.array(v_values)
-    q_centered = q_values - q_values.mean(axis=0)
-    v_centered = v_values - v_values.mean(axis=0)
-    denominator = float(np.sum(v_centered * v_centered))
-    if denominator < 1e-12:
-        raise ValueError('Not enough rotation to estimate sensor_offset.x')
-
-    x_estimate = float(np.sum(q_centered * v_centered) / denominator)
-    corrected_positions = q_values - x_estimate * v_values
-    residuals = corrected_positions - corrected_positions.mean(axis=0)
+    centers = np.array([
+        position - rotation @ offset_xy
+        for position, rotation in zip(positions, rotations)
+    ])
+    residuals = centers - centers.mean(axis=0)
     residual_rmse = float(np.sqrt(np.mean(np.sum(residuals * residuals, axis=1))))
-
-    raw_positions = np.array(raw_positions)
-    raw_centered = raw_positions - raw_positions.mean(axis=0)
+    raw_centered = positions - positions.mean(axis=0)
     raw_rmse = float(np.sqrt(np.mean(np.sum(raw_centered * raw_centered, axis=1))))
-    yaw_span = float(np.ptp(np.unwrap(np.array(yaws))))
+    yaw_span = float(np.ptp(np.unwrap(yaws)))
 
     return {
-        'x': x_estimate,
-        'samples': int(len(t_map_sensor_samples)),
+        'x': float(offset_xy[0]),
+        'y': float(offset_xy[1]),
+        'center_x': float(center_xy[0]),
+        'center_y': float(center_xy[1]),
+        'samples': int(len(odom_samples)),
         'yaw_span_rad': yaw_span,
         'yaw_span_deg': float(np.degrees(yaw_span)),
         'raw_position_rmse': raw_rmse,
-        'corrected_position_rmse': residual_rmse,
+        'corrected_center_rmse': residual_rmse,
     }
 
 
-def write_calibrated_yaml(data, params, result, output_path):
+def fit_circle_and_ellipse(odom_samples):
+    """Fit circle/ellipse diagnostics to odometry xy trajectory."""
+    positions = odom_samples[:, :2, 3]
+    if len(positions) < 5:
+        raise ValueError('At least 5 odometry samples are required for ellipse fitting')
+
+    center0 = positions.mean(axis=0)
+    radius0 = np.linalg.norm(positions - center0, axis=1).mean()
+
+    def circle_residual(values):
+        center_x, center_y, radius = values
+        radii = np.linalg.norm(positions - [center_x, center_y], axis=1)
+        return radii - radius
+
+    circle_solution = least_squares(
+        circle_residual,
+        [center0[0], center0[1], radius0],
+    )
+    circle_x, circle_y, circle_radius = circle_solution.x
+    circle_residuals = circle_residual(circle_solution.x)
+    circle_rmse = float(np.sqrt(np.mean(circle_residuals * circle_residuals)))
+
+    centered = positions - center0
+    covariance = np.cov(centered.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    theta0 = float(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+    semi_major0, semi_minor0 = np.sqrt(np.maximum(eigenvalues * 2.0, 1e-12))
+    if semi_major0 < semi_minor0:
+        semi_major0, semi_minor0 = semi_minor0, semi_major0
+        theta0 += np.pi / 2.0
+
+    def ellipse_residual(values):
+        center_x, center_y, log_a, log_b, theta = values
+        semi_major = np.exp(log_a)
+        semi_minor = np.exp(log_b)
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        x = positions[:, 0] - center_x
+        y = positions[:, 1] - center_y
+        x_rot = cos_theta * x + sin_theta * y
+        y_rot = -sin_theta * x + cos_theta * y
+        return (x_rot / semi_major) ** 2 + (y_rot / semi_minor) ** 2 - 1.0
+
+    ellipse_solution = least_squares(
+        ellipse_residual,
+        [
+            center0[0],
+            center0[1],
+            np.log(semi_major0),
+            np.log(semi_minor0),
+            theta0,
+        ],
+        max_nfev=20000,
+    )
+    ellipse_x, ellipse_y, log_a, log_b, theta = ellipse_solution.x
+    semi_major = float(np.exp(log_a))
+    semi_minor = float(np.exp(log_b))
+    if semi_minor > semi_major:
+        semi_major, semi_minor = semi_minor, semi_major
+        theta += np.pi / 2.0
+
+    eccentricity = float(
+        np.sqrt(max(0.0, 1.0 - (semi_minor * semi_minor) / (semi_major * semi_major)))
+    )
+    axis_ratio = float(semi_minor / semi_major)
+
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    x = positions[:, 0] - ellipse_x
+    y = positions[:, 1] - ellipse_y
+    x_rot = cos_theta * x + sin_theta * y
+    y_rot = -sin_theta * x + cos_theta * y
+    angle = np.arctan2(y_rot, x_rot)
+    ellipse_radius = 1.0 / np.sqrt(
+        (np.cos(angle) / semi_major) ** 2
+        + (np.sin(angle) / semi_minor) ** 2
+    )
+    point_radius = np.sqrt(x_rot * x_rot + y_rot * y_rot)
+    ellipse_radial_residuals = point_radius - ellipse_radius
+    ellipse_radial_rmse = float(
+        np.sqrt(np.mean(ellipse_radial_residuals * ellipse_radial_residuals))
+    )
+
+    return {
+        'circle_center_x': float(circle_x),
+        'circle_center_y': float(circle_y),
+        'circle_radius': float(circle_radius),
+        'circle_radial_rmse': circle_rmse,
+        'circle_relative_rmse': float(circle_rmse / abs(circle_radius)),
+        'ellipse_center_x': float(ellipse_x),
+        'ellipse_center_y': float(ellipse_y),
+        'ellipse_semi_major': semi_major,
+        'ellipse_semi_minor': semi_minor,
+        'ellipse_axis_ratio': axis_ratio,
+        'ellipse_eccentricity': eccentricity,
+        'ellipse_major_axis_rad': float(theta),
+        'ellipse_major_axis_deg': float(np.degrees(theta)),
+        'ellipse_radial_rmse': ellipse_radial_rmse,
+    }
+
+
+def corrected_centers(odom_samples, result, sensor_offset, odom_orientation_frame):
+    """Return compensated center xy samples using the calibrated offset."""
+    yaw_offset = float(sensor_offset[5])
+    offset_xy = np.array([result['x'], result['y']])
+    positions = odom_samples[:, :2, 3]
+    yaws = np.array([
+        R.from_matrix(sample[:3, :3]).as_euler('ZYX')[0]
+        for sample in odom_samples
+    ])
+    centers = []
+    for position, yaw in zip(positions, yaws):
+        rotation = rotation_for_offset(yaw, yaw_offset, odom_orientation_frame)
+        centers.append(position - rotation @ offset_xy)
+    return np.array(centers), np.unwrap(yaws)
+
+
+def save_diagnostic_plot(output_path, odom_samples, result, shape, sensor_offset,
+                         odom_orientation_frame):
+    """Save a PNG with trajectory, fit, residual, and yaw diagnostics."""
+    try:
+        os.environ.setdefault('MPLCONFIGDIR', str(Path.cwd() / '.matplotlib_cache'))
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError(
+            'matplotlib is required for --plot. Install python3-matplotlib.'
+        ) from exc
+
+    positions = odom_samples[:, :2, 3]
+    centers, yaws = corrected_centers(
+        odom_samples,
+        result,
+        sensor_offset,
+        odom_orientation_frame,
+    )
+
+    angle = np.linspace(0.0, 2.0 * np.pi, 360)
+    circle_x = (
+        shape['circle_center_x']
+        + shape['circle_radius'] * np.cos(angle)
+    )
+    circle_y = (
+        shape['circle_center_y']
+        + shape['circle_radius'] * np.sin(angle)
+    )
+
+    ellipse_angle = angle
+    ellipse_local_x = shape['ellipse_semi_major'] * np.cos(ellipse_angle)
+    ellipse_local_y = shape['ellipse_semi_minor'] * np.sin(ellipse_angle)
+    theta = shape['ellipse_major_axis_rad']
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    ellipse_x = (
+        shape['ellipse_center_x']
+        + cos_theta * ellipse_local_x
+        - sin_theta * ellipse_local_y
+    )
+    ellipse_y = (
+        shape['ellipse_center_y']
+        + sin_theta * ellipse_local_x
+        + cos_theta * ellipse_local_y
+    )
+
+    radii = np.linalg.norm(
+        positions - [shape['circle_center_x'], shape['circle_center_y']],
+        axis=1,
+    )
+    circle_residuals = radii - shape['circle_radius']
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
+    ax = axes[0, 0]
+    ax.plot(positions[:, 0], positions[:, 1], '.', markersize=1.5, label='odom xy')
+    ax.plot(circle_x, circle_y, '-', linewidth=1.2, label='circle fit')
+    ax.plot(ellipse_x, ellipse_y, '-', linewidth=1.2, label='ellipse fit')
+    ax.plot(result['center_x'], result['center_y'], 'x', markersize=8, label='calibrated center')
+    ax.set_title('Raw odometry trajectory')
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.axis('equal')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best')
+
+    ax = axes[0, 1]
+    ax.plot(centers[:, 0], centers[:, 1], '.', markersize=1.5)
+    ax.plot(centers[:, 0].mean(), centers[:, 1].mean(), 'x', markersize=8)
+    ax.set_title(
+        f'Corrected center trajectory, RMSE={result["corrected_center_rmse"]:.4f} m'
+    )
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.axis('equal')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    ax.plot(circle_residuals, linewidth=0.8)
+    ax.axhline(0.0, color='black', linewidth=0.8)
+    ax.set_title(
+        f'Circle radial residual, RMSE={shape["circle_radial_rmse"]:.4f} m'
+    )
+    ax.set_xlabel('sample')
+    ax.set_ylabel('residual [m]')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+    ax.plot(np.degrees(yaws), linewidth=0.8)
+    ax.set_title(f'Yaw span={result["yaw_span_deg"]:.1f} deg')
+    ax.set_xlabel('sample')
+    ax.set_ylabel('yaw [deg]')
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle(
+        'sensor_offset '
+        f'x={result["x"]:.6f} m, y={result["y"]:.6f} m; '
+        f'ellipse e={shape["ellipse_eccentricity"]:.6f}, '
+        f'b/a={shape["ellipse_axis_ratio"]:.6f}'
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def write_calibrated_yaml(data, params, result, output_path, write_map_origin):
     """Write a complete calibrated ROS 2 params file."""
     sensor_offset = list(params.get('sensor_offset', [0.0] * 6))
     if len(sensor_offset) != 6:
         raise ValueError('sensor_offset must contain 6 values')
 
     sensor_offset[0] = result['x']
+    sensor_offset[1] = result['y']
     params['sensor_offset'] = [float(value) for value in sensor_offset]
+
+    if write_map_origin:
+        map_origin_offset = list(params.get('map_origin_offset', [0.0] * 6))
+        if len(map_origin_offset) != 6:
+            raise ValueError('map_origin_offset must contain 6 values')
+        map_origin_offset[0] = -result['center_x']
+        map_origin_offset[1] = -result['center_y']
+        params['map_origin_offset'] = [float(value) for value in map_origin_offset]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as stream:
@@ -229,53 +405,139 @@ def parse_args():
     """Parse command-line arguments."""
     package_root = default_package_root()
     default_params = package_root / 'config' / 'default.yaml'
-    default_output = package_root / 'config' / 'calibrated.yaml'
+    default_output = package_root / 'output' / 'calibrated.yaml'
 
     parser = argparse.ArgumentParser(
-        description='Calibrate coordinate_transformer sensor_offset.x from a bag.'
+        description='Calibrate planar sensor_offset x/y from self-rotation odometry.'
     )
     parser.add_argument('bag_dir', type=Path, help='Path to a rosbag2 directory')
     parser.add_argument('--params-file', type=Path, default=default_params)
     parser.add_argument('--output', type=Path, default=default_output)
     parser.add_argument('--odom-topic', default='/odin1/odometry_highfreq')
-    parser.add_argument('--tf-topic', default='/tf')
     parser.add_argument('--source-frame', default=None)
-    parser.add_argument('--target-frame', default=None)
-    parser.add_argument('--max-tf-gap', type=float, default=0.2)
+    parser.add_argument(
+        '--odom-orientation-frame',
+        choices=['planar', 'sensor', 'base'],
+        default=None,
+    )
+    parser.add_argument(
+        '--write-map-origin',
+        action='store_true',
+        help='Also write -rotation_center into map_origin_offset x/y.',
+    )
+    parser.add_argument(
+        '--plot',
+        action='store_true',
+        help='Write a calibration diagnostic PNG next to the output YAML.',
+    )
+    parser.add_argument(
+        '--plot-output',
+        type=Path,
+        default=None,
+        help='Path for the diagnostic PNG. Implies --plot.',
+    )
     return parser.parse_args()
 
 
 def main():
-    """Run x-offset calibration and write calibrated.yaml."""
+    """Run planar sensor_offset calibration and write calibrated.yaml."""
     args = parse_args()
     data, params = read_template(args.params_file)
-    args.source_frame = args.source_frame or params.get('source_frame', 'odom')
-    args.target_frame = args.target_frame or params.get('target_frame', 'map')
+    source_frame = args.source_frame or params.get('source_frame', 'odom')
+    odom_orientation_frame = (
+        args.odom_orientation_frame
+        or params.get('odom_orientation_frame', 'planar')
+    )
 
     sensor_offset = params.get('sensor_offset', [0.0] * 6)
     if len(sensor_offset) != 6:
         raise ValueError('sensor_offset must contain 6 values')
 
-    odom_samples, tf_samples = read_bag_samples(args)
-    t_map_sensor_samples = build_map_sensor_samples(
-        odom_samples,
-        tf_samples,
-        args.max_tf_gap,
+    odom_samples = read_odometry_samples(
+        args.bag_dir,
+        args.odom_topic,
+        source_frame,
     )
-    result = calibrate_x(t_map_sensor_samples, sensor_offset)
-    write_calibrated_yaml(data, params, result, args.output)
+    result = calibrate_x(
+        odom_samples,
+        sensor_offset,
+        odom_orientation_frame=odom_orientation_frame,
+    )
+    shape = fit_circle_and_ellipse(odom_samples)
+    write_calibrated_yaml(
+        data,
+        params,
+        result,
+        args.output,
+        args.write_map_origin,
+    )
 
+    calibrated_offset = list(sensor_offset)
+    calibrated_offset[0] = result['x']
+    calibrated_offset[1] = result['y']
+
+    print('Recommended sensor_offset:')
+    print(
+        '['
+        + ', '.join(f'{float(value):.6f}' for value in calibrated_offset)
+        + ']'
+    )
     print(f'Calibrated sensor_offset.x: {result["x"]:.6f} m')
+    print(f'Calibrated sensor_offset.y: {result["y"]:.6f} m')
+    print(
+        'Estimated self-rotation center in odom xy: '
+        f'({result["center_x"]:.6f}, {result["center_y"]:.6f}) m'
+    )
+    print(
+        'If you want this center to become the origin, use map_origin_offset xy: '
+        f'({-result["center_x"]:.6f}, {-result["center_y"]:.6f}) m'
+    )
     print(f'Samples used: {result["samples"]}')
     print(
         f'Yaw span: {result["yaw_span_rad"]:.3f} rad '
         f'({result["yaw_span_deg"]:.1f} deg)'
     )
     print(f'Raw position RMSE: {result["raw_position_rmse"]:.6f} m')
+    print(f'Corrected center RMSE: {result["corrected_center_rmse"]:.6f} m')
+    print('Trajectory shape diagnostics:')
     print(
-        'Corrected center RMSE: '
-        f'{result["corrected_position_rmse"]:.6f} m'
+        '  Circle center/radius: '
+        f'({shape["circle_center_x"]:.6f}, {shape["circle_center_y"]:.6f}), '
+        f'r={shape["circle_radius"]:.6f} m'
     )
+    print(
+        '  Circle radial RMSE: '
+        f'{shape["circle_radial_rmse"]:.6f} m '
+        f'({shape["circle_relative_rmse"]:.3%} of radius)'
+    )
+    print(
+        '  Ellipse center: '
+        f'({shape["ellipse_center_x"]:.6f}, {shape["ellipse_center_y"]:.6f})'
+    )
+    print(
+        '  Ellipse semi axes: '
+        f'a={shape["ellipse_semi_major"]:.6f} m, '
+        f'b={shape["ellipse_semi_minor"]:.6f} m, '
+        f'b/a={shape["ellipse_axis_ratio"]:.6f}'
+    )
+    print(f'  Ellipse eccentricity: {shape["ellipse_eccentricity"]:.6f}')
+    print(
+        '  Ellipse major axis angle: '
+        f'{shape["ellipse_major_axis_rad"]:.6f} rad '
+        f'({shape["ellipse_major_axis_deg"]:.1f} deg)'
+    )
+    print(f'  Ellipse radial RMSE: {shape["ellipse_radial_rmse"]:.6f} m')
+    if args.plot or args.plot_output is not None:
+        plot_output = args.plot_output or args.output.with_suffix('.png')
+        save_diagnostic_plot(
+            plot_output,
+            odom_samples,
+            result,
+            shape,
+            sensor_offset,
+            odom_orientation_frame,
+        )
+        print(f'Wrote diagnostic plot: {plot_output}')
     print(f'Wrote calibrated params: {args.output}')
 
 

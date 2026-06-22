@@ -16,7 +16,7 @@ setup(
             'launch/odin_transformer.launch.py',
         ]),
     ],
-    install_requires=['setuptools', 'numpy', 'PyYAML', 'scipy'],
+    install_requires=['setuptools', 'numpy', 'PyYAML', 'scipy', 'matplotlib'],
     zip_safe=True,
     maintainer='fjienan',
     maintainer_email='fjienan@163.com',
@@ -30,7 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'coordinate_transformer = coordinate_transformer.coordinate_transformer:main',
-            'calibrate_sensor_x = coordinate_transformer.calibrate_sensor_x:main',
+            'calibrate_sensor_offset = coordinate_transformer.calibrate_sensor_x:main',
         ],
     },
 )

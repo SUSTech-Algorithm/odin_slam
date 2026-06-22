@@ -1,11 +1,16 @@
 build/
 install
 log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.matplotlib_cache/
 .catkin_workspace
 .catkin_tools
 ros.zip
 ros/
 rosbag2*
 rosbag*
+src/coordinate_transformer/coordinate_transformer/output/
 .codex
 .agents

@@ -1,206 +1,189 @@
 # coordinate_transformer
 
-ROS2 坐标系转换包，用于 odin SLAM 系统。将 Odin 传感器位姿转换为 map 坐标系下的机器人中心/base_link 位姿，并支持 map 原点偏移调整。
+ROS2 package for Odin SLAM pose relocation. It subscribes to Odin odometry, looks up the latest `odom -> map` TF, compensates the planar sensor offset, and publishes a robot-center pose.
 
-## 功能
+## What It Provides
 
-- **odom → map 坐标变换**: 订阅 odom 坐标系下的 Odin 传感器位姿，转换到 map 坐标系
-- **传感器偏移补偿**: 根据安装外参，将 Odin 传感器 pose 换算成机器人中心/base_link pose
-- **map 原点偏移**: 支持移动 map 坐标系原点到任意位置
-- **点云转换**: 支持点云数据的坐标系转换
+- `coordinate_transformer`: online ROS2 node.
+- `calibrate_sensor_offset`: offline rosbag calibration tool.
+- `transformer_launch.py`: launch only the coordinate transformer node.
+- `odin_transformer.launch.py`: launch Odin driver related nodes plus the coordinate transformer node.
 
-## 依赖
+Do not launch both `transformer_launch.py` and `odin_transformer.launch.py` at the same time unless you intentionally want two `coordinate_transformer` nodes. `odin_transformer.launch.py` already starts one.
 
-- ROS2 Humble
-- numpy
-- scipy
+## Node Behavior
 
-## 构建
+### `coordinate_transformer`
+
+Executable:
 
 ```bash
-# 进入工作空间
-cd ~/your_workspace
-
-# 构建包
-colcon build --packages-select coordinate_transformer
-
-# source 环境
-source install/setup.bash
+ros2 run coordinate_transformer coordinate_transformer
 ```
 
-## 配置
+Main inputs:
 
-配置文件位于 `config/default.yaml`:
+| Input | Type | Default | Purpose |
+|------|------|---------|---------|
+| `/odin1/odometry_highfreq` | `nav_msgs/Odometry` | `odin_pose_topic` | Odin sensor pose in `source_frame` |
+| `/tf` | `tf2_msgs/TFMessage` | TF buffer | latest transform from `source_frame` to `target_frame` |
 
-```yaml
-coordinate_transformer:
-  ros__parameters:
-    # Topic 配置
-    odin_pose_topic: '/odin_odom'
-    output_pose_topic: '/transformed/pose'
+Main output:
 
-    # 传感器在机器人中心/base_link 坐标系下的位姿 [x, y, z, roll, pitch, yaw]
-    # 单位: 米 / 弧度
-    sensor_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+| Output | Type | Default | Purpose |
+|------|------|---------|---------|
+| `/odin1/relocation` | `geometry_msgs/PoseStamped` | `output_pose_topic` | compensated robot-center pose in `target_frame`, or `fallback_output_frame` before TF is initialized |
 
-    # map 坐标系原点偏移 [x, y, z, roll, pitch, yaw]
-    map_origin_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+The odometry message `child_frame_id` is ignored. The node only uses `header.frame_id` as a sanity check and `pose.pose` as the sensor pose.
 
-    # TF 配置
-    source_frame: 'odom'
-    target_frame: 'map'
-    tf_timeout: 1.0
+The transform chain is:
 
-    # 发布选项
-    publish_transformed_pose: True
+```text
+T_map_sensor = T_map_odom @ T_odom_sensor
 ```
 
-### Topic 参数说明
+Then the planar lever-arm correction is:
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `odin_pose_topic` | string | '/odin_odom' | odin 位姿输入话题 |
-| `output_pose_topic` | string | '/transformed/pose' | 转换后位姿输出话题 |
+```text
+robot_xy = sensor_xy - R(yaw - sensor_offset.yaw) @ sensor_offset.xy
+```
 
-### 参数说明
+The published orientation currently stays equal to the transformed odometry orientation. The `sensor_offset.yaw` only affects the xy lever-arm direction.
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `sensor_offset` | list[6] | [0,0,0,0,0,0] | Odin 传感器坐标系在机器人中心/base_link 坐标系下的位姿，即 `T_base_sensor`；x>0 表示传感器在机器人中心前方 |
-| `map_origin_offset` | list[6] | [0,0,0,0,0,0] | map 原点偏移量 |
-| `source_frame` | string | 'odom' | 源坐标系 |
-| `target_frame` | string | 'map' | 目标坐标系 |
-| `tf_timeout` | float | 1.0 | TF 查询超时时间 (秒) |
+Relocalization fallback:
 
-## 使用
+- On startup, the node waits for the `target_frame <- source_frame` TF.
+- If TF is still unavailable after `tf_initialization_timeout`, the node falls back to `/odin1/odometry_highfreq` and publishes in `fallback_output_frame` (`odom` by default).
+- The terminal prints a clear warning when fallback starts, repeats a throttled warning while fallback continues, and prints an info message when TF becomes available again.
+- Downstream nodes should check `/odin1/relocation.header.frame_id`: `map` means relocalized/map output, while `odom` means temporary fallback output.
 
-### 方式一: 使用 launch 文件
+### `calibrate_sensor_offset`
+
+Executable:
+
+```bash
+ros2 run coordinate_transformer calibrate_sensor_offset <bag_dir>
+```
+
+It reads `/odin1/odometry_highfreq` from an offline rosbag and estimates `sensor_offset.x/y` from self-rotation. The idea is that during in-place rotation the sensor draws a circle, while the robot center should stay as still as possible.
+
+Default output:
+
+```text
+src/coordinate_transformer/coordinate_transformer/output/calibrated.yaml
+```
+
+With diagnostics plot:
+
+```bash
+ros2 run coordinate_transformer calibrate_sensor_offset <bag_dir> --plot
+```
+
+This also writes:
+
+```text
+src/coordinate_transformer/coordinate_transformer/output/calibrated.png
+```
+
+The plot contains raw odometry xy, circle/ellipse fits, corrected center trajectory, radial residuals, and yaw coverage.
+
+## Launch Files
+
+### `transformer_launch.py`
+
+Starts only:
+
+| Node | Package | Executable | Purpose |
+|------|---------|------------|---------|
+| `coordinate_transformer` | `coordinate_transformer` | `coordinate_transformer` | online pose relocation |
+
+Use this when Odin driver/TF sources are already running:
 
 ```bash
 ros2 launch coordinate_transformer transformer_launch.py
 ```
 
-### 方式二: 直接运行节点
+### `odin_transformer.launch.py`
+
+Starts a full Odin pipeline plus relocation:
+
+| Node | Package | Executable | Purpose |
+|------|---------|------------|---------|
+| `host_sdk_sample` | `odin_ros_driver` | `host_sdk_sample` | Odin device/SLAM driver |
+| `pcd2depth_ros2_node` | `odin_ros_driver` | `pcd2depth_ros2_node` | point cloud to depth image processing |
+| `cloud_reprojection_ros2_node` | `odin_ros_driver` | `cloud_reprojection_ros2_node` | cloud reprojection processing |
+| `image_overlay_node` | `odin_ros_driver` | `image_overlay_node` | image overlay processing |
+| `rviz2` | `rviz2` | `rviz2` | visualization |
+| `coordinate_transformer` | `coordinate_transformer` | `coordinate_transformer` | online pose relocation |
+
+Use this when you want to start the Odin driver stack and relocation together:
 
 ```bash
-ros2 run coordinate_transformer coordinate_transformer --ros-args --params-file $(find coordinate_transformer)/config/default.yaml
+ros2 launch coordinate_transformer odin_transformer.launch.py
 ```
 
-### 方式三: 运行时覆盖参数
+If you see two relocation topics being published or duplicate node-name warnings, check whether another terminal already launched `coordinate_transformer`.
+
+## Configuration
+
+Default parameter file:
+
+```text
+src/coordinate_transformer/coordinate_transformer/config/default.yaml
+```
+
+Important parameters:
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `sensor_offset` | `[-0.395299, 0.019101, 0.0, 0.0, 0.0, pi]` | sensor pose relative to robot center: `[x, y, z, roll, pitch, yaw]` |
+| `map_origin_offset` | `[0, 0, 0, 0, 0, 0]` | final position offset added after compensation |
+| `source_frame` | `odom` | odometry pose frame |
+| `target_frame` | `map` | output pose frame |
+| `tf_timeout` | `0.05` | timeout for TF lookup |
+| `mount_profile` | `yaw_180` | selected mount flow; default keeps the existing yaw 180 behavior |
+| `fallback_when_tf_missing` | `true` | publish odom-frame fallback after TF initialization timeout |
+| `tf_initialization_timeout` | `3.0` | seconds to wait for TF before entering fallback |
+| `fallback_output_frame` | `odom` | frame id used while publishing fallback odometry output |
+| `fallback_warn_period` | `5.0` | throttled warning period while fallback remains active |
+| `odin_pose_topic` | `/odin1/odometry_highfreq` | odometry input topic |
+| `output_pose_topic` | `/odin1/relocation` | relocated pose output topic |
+| `publish_rate` | `100.0` | timer publish rate for cached latest pose |
+
+`sensor_offset.x > 0` means the sensor is in front of the robot center. `sensor_offset.y > 0` means the sensor is to the left. In the current setup `sensor_offset.yaw = pi` means the sensor frame yaw is 180 degrees from the robot frame, but this yaw is used only for position compensation.
+
+## Calibration Workflow
+
+1. Put the robot approximately in-place rotation.
+2. Record a rosbag containing `/odin1/odometry_highfreq`.
+3. Run:
 
 ```bash
-ros2 run coordinate_transformer coordinate_transformer --ros-args \
-  -p sensor_offset:="[0.3, 0.0, 0.5, 0.0, 0.0, 0.0]" \
-  -p map_origin_offset:="[10.0, 5.0, 0.0, 0.0, 0.0, 0.0]"
+ros2 run coordinate_transformer calibrate_sensor_offset <bag_dir> --plot
 ```
 
-## 订阅话题
+4. Inspect `output/calibrated.png`.
+5. Copy the recommended `sensor_offset` into `config/default.yaml` if the result is reasonable.
 
-| 话题 | 类型 | 说明 |
-|------|------|------|
-| `/odin_odom` | nav_msgs/Odometry | Odin 传感器在 odom 下的位姿 |
-| `/points` | sensor_msgs/PointCloud2 | 待转换的点云 |
+Good signs:
 
-## 发布话题
+- `Corrected center RMSE` is small.
+- The corrected center plot is compact.
+- Yaw span covers at least one full rotation.
+- Circle/ellipse diagnostics do not show large systematic distortion.
 
-| 话题 | 类型 | 说明 |
-|------|------|------|
-| `/transformed/pose` | geometry_msgs/PoseStamped | map 坐标系下的机器人中心/base_link 位姿 |
-| `/transformed/points` | sensor_msgs/PointCloud2 | 转换到 map 坐标系的点云 |
+## Build
 
-## 坐标变换原理
-
-目标输出是 `T_map_robot`：机器人中心/base_link 坐标系在 map 坐标系下的位姿。
-
-约定:
-
-- `T_map_odom`: TF 中 `odom -> map` 的变换，即 map 坐标系下的 odom 位姿
-- `T_odom_sensor`: Odin SLAM 输出的传感器位姿
-- `T_robot_sensor`: `sensor_offset`，传感器坐标系在机器人中心/base_link 坐标系下的位姿
-- `T_sensor_robot`: `T_robot_sensor` 的逆，用于从传感器位姿换算到机器人中心/base_link 位姿
-
-完整 pose 变换链:
-
-```
-T_map_sensor = T_map_odom @ T_odom_sensor
-T_map_robot  = T_map_sensor @ T_sensor_robot
-T_output     = T_map_offset @ T_map_robot
+```bash
+colcon build --packages-select coordinate_transformer
+source install/setup.bash
 ```
 
-即: 先把 Odin 传感器 pose 表达到 map 中，再根据安装外参换算成机器人中心/base_link pose。这里不会对整个 map 坐标系做共轭变换。
+## Dependencies
 
-### 传感器偏移
-
-如果 Odin 传感器不在机器人中心，需要测量并配置 `sensor_offset`。这个偏移描述的是传感器坐标系在机器人中心/base_link 坐标系下的位姿。机器人原地自转时，原始 Odin 传感器位置可能绕机器人中心画圆；转换后的机器人中心位置应基本保持不动，主要只有 yaw 变化。
-
-Odometry 的 `child_frame_id` 不参与坐标计算；节点只使用 `pose.pose` 作为传感器在 `source_frame` 下的位姿。
-
-## 标定方法
-
-### 传感器偏移标定
-
-1. 让机器人近似原地自转并录制 rosbag
-2. 运行 `ros2 run coordinate_transformer calibrate_sensor_x <bag_dir>`
-3. 标定工具会只估计 `sensor_offset.x`，其它外参沿用当前参数文件
-4. 默认生成 `config/calibrated.yaml`，不会覆盖 `default.yaml`
-
-当前 `default.yaml` 中的 `sensor_offset` 是根据一段原地自转 rosbag 初步拟合出的值，用于减少旋转时的半径残差。它不应替代实际机械测量；如果传感器安装位置变化，需要重新标定。
-
-### map 原点标定
-
-1. 确定你想要的 map 原点位置 (例如场地左下角)
-2. 测量该位置相对于 SLAM 原点的偏移
-3. 将偏移值填入 `map_origin_offset`
-
-## 示例配置
-
-### 示例 1: 基本配置
-
-```yaml
-coordinate_transformer:
-  ros__parameters:
-    sensor_offset: [0.3, 0.0, 0.2, 0.0, 0.0, 0.0]
-    map_origin_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-```
-
-### 示例 2: 带 map 原点偏移
-
-```yaml
-coordinate_transformer:
-  ros__parameters:
-    sensor_offset: [0.3, 0.0, 0.2, 0.0, 0.0, 0.0]
-    map_origin_offset: [10.0, 5.0, 0.0, 0.0, 0.0, 0.0]
-```
-
-### 示例 3: 带角度偏移
-
-```yaml
-coordinate_transformer:
-  ros__parameters:
-    sensor_offset: [0.3, 0.0, 0.2, 0.0, 0.0, 1.5708]  # 90度安装偏差
-    map_origin_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-```
-
-## API
-
-### Python API
-
-```python
-from coordinate_transformer.transformer import OffsetTransformer, PoseTransformer
-import numpy as np
-
-# 初始化
-transformer = OffsetTransformer(
-    sensor_offset=(0.3, 0.0, 0.2, 0.0, 0.0, 0.0),
-    map_origin_offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-)
-
-# 位姿变换
-odom_pose = (1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0)  # x,y,z,qx,qy,qz,qw
-tf_odom_to_map = np.eye(4)  # 从 TF 树获取
-map_pose = transformer.odom_to_map_with_offset(odom_pose, tf_odom_to_map)
-
-# 点变换
-point = (1.0, 2.0, 3.0)
-transformed_point = transformer.transform_point(point, tf_matrix)
-```
+- ROS2 Humble
+- `numpy`
+- `scipy`
+- `PyYAML`
+- `matplotlib` for `--plot`
+- `rosbag2_py` and `rosidl_runtime_py` for offline calibration
