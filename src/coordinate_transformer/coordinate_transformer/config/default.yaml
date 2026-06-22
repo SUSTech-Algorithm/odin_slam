@@ -37,6 +37,24 @@ coordinate_transformer:
     # 等待 TF 变换的超时时间 (秒)
     tf_timeout: 0.05
 
+    # 安装模式。默认保留当前成熟的 yaw_180 流程；pitch_180 供倒装流程显式启用
+    mount_profile: 'yaw_180'
+
+    # ============================================
+    # 重定位/TF 未初始化 fallback
+    # ============================================
+    # 启动后先等待 target_frame <- source_frame TF；超时仍不可用时退化为 odom 输出
+    fallback_when_tf_missing: True
+
+    # 启动后等待 TF 初始化的时间 (秒)
+    tf_initialization_timeout: 3.0
+
+    # fallback 输出坐标系。默认直接使用 /odin1/odometry_highfreq 所在的 odom 系
+    fallback_output_frame: 'odom'
+
+    # fallback 持续期间终端节流提示周期 (秒)
+    fallback_warn_period: 5.0
+
     # planar: 平面机器人模型；yaw 只影响平移补偿方向，不改输出角度
     # sensor: odometry orientation 是传感器坐标系朝向，会应用完整外参旋转到输出
     # base: odometry orientation 已经是 base_link 朝向，只用平移外参修正位置
