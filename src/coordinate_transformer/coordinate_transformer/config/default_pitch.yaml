@@ -1,0 +1,80 @@
+# Coordinate Transformer Configuration
+#
+# 用于配置 odin SLAM 的坐标转换参数
+#
+# 使用方式:
+#   ros2 run coordinate_transformer coordinate_transformer --ros-args --params-file $(find coordinate_transformer)/config/default.yaml
+
+coordinate_transformer:
+  ros__parameters:
+    # ============================================
+    # 传感器在机器人中心/base_link 坐标系下的位姿 (T_base_sensor)
+    # ============================================
+    # (x, y, z) 单位: 米
+    # (roll, pitch, yaw) 单位: 弧度
+    # x > 0 表示 odin (传感器) 在机器人中心/base_link 前方
+    # y > 0 表示 odin (传感器) 在机器人中心/base_link 左侧
+    # yaw = pi 表示传感器物理坐标系与机器人坐标系相差 180 度
+    sensor_offset: [-0.395299, 0.019101, 0.0, 0.0, 0.0, 3.141592653589]
+
+    # ============================================
+    # map 坐标系原点偏移
+    # ============================================
+    # 坐标原点偏移与传感器外参标定分开处理；默认不扣除自转圆心
+    # (x, y, z) 单位: 米
+    # (roll, pitch, yaw) 单位: 弧度
+    map_origin_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # ============================================
+    # TF 配置
+    # ============================================
+    # 源坐标系 (输入数据的坐标系)
+    source_frame: 'odom'
+
+    # 目标坐标系 (输出数据的坐标系)
+    target_frame: 'map'
+
+    # 等待 TF 变换的超时时间 (秒)
+    tf_timeout: 0.05
+
+    # 安装模式。默认保留当前成熟的 yaw_180 流程；pitch_180 供倒装流程显式启用
+    mount_profile: 'yaw_180'
+
+    # ============================================
+    # 重定位/TF 未初始化 fallback
+    # ============================================
+    # 启动后先等待 target_frame <- source_frame TF；超时仍不可用时退化为 odom 输出
+    fallback_when_tf_missing: True
+
+    # 启动后等待 TF 初始化的时间 (秒)
+    tf_initialization_timeout: 3.0
+
+    # fallback 输出坐标系。默认直接使用 /odin1/odometry_highfreq 所在的 odom 系
+    fallback_output_frame: 'odom'
+
+    # fallback 持续期间终端节流提示周期 (秒)
+    fallback_warn_period: 5.0
+
+    # planar: 平面机器人模型；yaw 只影响平移补偿方向，不改输出角度
+    # sensor: odometry orientation 是传感器坐标系朝向，会应用完整外参旋转到输出
+    # base: odometry orientation 已经是 base_link 朝向，只用平移外参修正位置
+    odom_orientation_frame: 'planar'
+
+    # ============================================
+    # Topic 名称配置
+    # ============================================
+    # 输入: odin 位姿话题
+    odin_pose_topic: '/odin1/odometry_highfreq'
+
+    # 输出: 转换后的位姿话题
+    output_pose_topic: '/odin1/relocation'
+
+    # ============================================
+    # 发布选项
+    # ============================================
+    # 是否发布转换后的位姿
+    publish_transformed_pose: True
+
+    # 发布频率 (Hz)，与输入消息频率解耦
+    # 根据下游节点的需求调整，默认 10Hz
+    publish_rate: 100.0
